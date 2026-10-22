@@ -1,6 +1,8 @@
 # Test changes before production
 
-`main` is the released source. `staging` is the test branch. A staging push does not change `main`, and must not trigger a production deployment. Production and staging are separate Render services with separate SQLite disks.
+`main` is the released source. `staging` is the test branch. A staging push does not change `main`, and must not trigger a production deployment. If a hosted staging service is used, it must have its own SQLite disk, separate from production.
+
+The current agreed workflow uses local VS Code testing of `staging` instead of purchasing a second Render instance. The separate hosted staging service below is optional. For local review, fetch/switch/pull `staging`, run the automated checks, start the app with your local test database, and review the changed screens. Record the reviewed commit before approving a release. Do not test mutations against the production service or copy the production database into automated tests.
 
 ## One-time dashboard settings
 
@@ -56,7 +58,7 @@ If GitHub does not offer enforcement for the repository's visibility and plan, k
 2. Install the locked test tools with `npm ci`. For browser tests, run `npx playwright install chromium` once on the development machine.
 3. Run `npm test` and `npm run test:e2e`. Add checks for the changed behavior when needed. Browser tests always start a private server with a new temporary database; they never use the developer or production `DATA_DIR`.
 4. Push the change to `staging`, or open a feature PR targeting `staging` and merge after checks pass. GitHub runs the backend suite in test and production modes plus Chromium browser tests.
-5. Wait for the staging service to deploy the commit. Test the changed behavior at the staging HTTPS URL with fake records, including the appropriate admin/employee roles.
+5. Test the staging checkout locally in VS Code using fake records and the appropriate admin/employee roles. If you separately configured a hosted staging service, testing that deployment is an optional additional check.
 6. Record the tested commit and ask the user to approve the concrete result. New commits require checks and review again.
 7. Open a PR from `staging` into `main`. For this repository, the compare page is <https://github.com/brketterl/Timekeeper/compare/main...staging?expand=1>. Review the final diff and required checks. Merge only after the user authorizes that release.
 8. Back up the production database before any data migration. Manually deploy the approved `main` commit in Render, then check `/health`, login, and the changed behavior on production.

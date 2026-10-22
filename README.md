@@ -35,7 +35,9 @@ To remove an unused employee record, choose **Team → Remove from team**. Recor
 
 Saves use a revision check to reject stale updates from other tabs or devices. The header distinguishes saving, saved, and unsaved changes. If saving fails, export your changes before reloading the server copy; the app does not silently overwrite newer data.
 
-Back up the database using SQLite's online backup tooling or stop the server before copying its database files. Do not copy only the main database file while WAL writes are active. Keep backups outside the checkout and protect them as sensitive data. The JSON export is an additional workspace-level backup, not an account or session backup.
+Encrypted database recovery, scheduling, and optional Google Drive uploads are available; see [Database recovery backups](docs/backups.md) for local testing, encryption-key handling, Google authorization, and Render configuration. They run in the existing service and are disabled until configured. The Settings recovery panel reports separate local and Google timestamps. Only explicitly configured server backup operators can download full recovery copies after confirming their password. Other workspace admins cannot download every workspace's accounts or records.
+
+Do not copy only the main SQLite file while WAL writes are active. Recovery archives use SQLite's online backup API. Keep encrypted copies outside the hosting disk and keep the encryption key separately. The JSON export remains an additional workspace-level copy; it does not recover accounts or memberships.
 
 ## Invite partners and employees
 
@@ -87,6 +89,8 @@ All bodies are JSON; mutation requests require an `Origin` matching the applicat
 | `POST` | `/api/invitations/preview` | Public token lookup `{token}`; reports workspace, invitee email, and role |
 | `POST` | `/api/invitations/accept` | Signed-in acceptance `{token}`; matching email required |
 | `GET` | `/health` | Checks database availability |
+| `GET` | `/api/backups/status` | Admin-only configuration and verification timestamps; no keys, paths, or archive contents |
+| `POST` | `/api/backups/download` | Configured server operator only; `{currentPassword}` creates a fresh encrypted instance recovery archive |
 
 ## Validation
 
@@ -120,6 +124,6 @@ The browser tests use a new temporary SQLite database, not the developer's or pr
 
 - Email verification, password reset, and account recovery (not implemented yet).
 - Resource-level business APIs, normalized financial tables, and an audit history.
-- Deployment, scheduled database backups, and operational monitoring.
+- Backup failure notifications and operational monitoring. Google connectivity and off-site restore checks require your own configured account.
 
 Invoice sending currently records a date; it does not send email. Payments are recorded manually and are not processed by the app.

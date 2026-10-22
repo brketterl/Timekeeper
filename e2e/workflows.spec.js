@@ -116,3 +116,22 @@ test('email correction, unused team deletion, and signing in with the corrected 
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Everything, in good time.' })).toBeVisible();
 });
+
+test('configured backup operator downloads an encrypted recovery archive from Settings', async ({ page }, info) => {
+  await page.goto('/');
+  await register(page, 'Backup operator', `backup-operator-${info.retry}@example.test`);
+  await page.locator('nav button[title=Settings]').click();
+  await expect(page.locator('#recovery-backups')).toContainText('These copies are on the server disk only.');
+  await page.getByRole('button', { name: 'Create and download encrypted recovery copy', exact: true }).click();
+  await page.getByLabel('Current password', { exact: true }).fill(password);
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Create and download', exact: true }).click();
+  const downloaded = await downloadPromise;
+  expect(downloaded.suggestedFilename()).toMatch(/^timekeeper-.*\.tkbackup$/);
+  const stream = await downloaded.createReadStream();
+  const chunks = []; for await (const chunk of stream) chunks.push(chunk);
+  const contents = Buffer.concat(chunks);
+  expect(contents.subarray(0, 10).toString()).toBe('TKBACKUP1\n');
+  expect(contents.includes(Buffer.from('backup-operator'))).toBe(false);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});

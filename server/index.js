@@ -2,10 +2,14 @@ import { createServer } from 'node:http';
 import { randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual, createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { readFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { openDatabase } from './db.js';
 import { accessStore } from './access.js';
+import { backupOptions, backupService } from './backups.js';
+import { googleBackupOptions, googleDriveDestination } from './google-backups.js';
 
 const scrypt = promisify(scryptCallback);
 const digest = token => createHash('sha256').update(token).digest('hex');
@@ -38,7 +42,7 @@ async function body(req) {
   catch { throw fail(400, 'Invalid JSON.'); }
 }
 
-export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), secureCookies = process.env.NODE_ENV === 'production', allowedOrigin = process.env.APP_ORIGIN } = {}) {
+export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), secureCookies = process.env.NODE_ENV === 'production', allowedOrigin = process.env.APP_ORIGIN, backupConfig = null } = {}) {
   if (secureCookies && !allowedOrigin) throw Error('APP_ORIGIN is required in production.');
   if (allowedOrigin) {
     const origin = new URL(allowedOrigin);
@@ -49,6 +53,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
   const db = openDatabase(dataDir);
   const attempts = new Map();
   const access = accessStore(db);
+  const recovery = backupService(db, backupConfig, { destination: backupConfig?.destination });
   function checkAuthLimit(req) {
     const now = Date.now();
     for (const [key, entry] of attempts) if (entry.until < now) attempts.delete(key);
@@ -78,7 +83,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         const html = await readFile(new URL('../public/index.html', import.meta.url));
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(html);
       }
-      if (req.method === 'GET' && ['/auth.js', '/access.js'].includes(path)) {
+      if (req.method === 'GET' && ['/auth.js', '/access.js', '/backups.js'].includes(path)) {
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
         return res.end(await readFile(new URL(`../public${path}`, import.meta.url)));
       }
@@ -135,6 +140,30 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         JOIN users u ON u.id = s.user_id JOIN memberships m ON m.user_id = s.user_id AND m.workspace_id = s.workspace_id
         WHERE token_hash = ? AND expires_at > ?`).get(digest(token), Date.now());
       if (!session) throw fail(401, 'Please sign in.');
+      if (req.method === 'GET' && path === '/api/backups/status') {
+        if (session.role !== 'admin') throw fail(403, 'Admin access is required.');
+        return send(200, { ...recovery.status(), canDownload: recovery.isOperator(session) });
+      }
+      if (req.method === 'POST' && path === '/api/backups/download') {
+        if (!recovery.isOperator(session)) throw fail(403, 'Only the configured server backup operator can download recovery archives.');
+        checkAuthLimit(req);
+        const input = await body(req);
+        if (typeof input.currentPassword !== 'string' || input.currentPassword.length > 256) throw fail(400, 'Enter your current password.');
+        const user = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(session.user_id);
+        if (!await checkPassword(input.currentPassword, user?.password_hash)) throw fail(401, 'Your current password is incorrect.');
+        const checkOperator = () => {
+          const current = db.prepare(`SELECT u.email, u.password_hash, m.role FROM sessions s JOIN users u ON u.id=s.user_id
+            JOIN memberships m ON m.user_id=s.user_id AND m.workspace_id=s.workspace_id
+            WHERE s.token_hash=? AND s.expires_at>?`).get(digest(token), Date.now());
+          if (!current || current.password_hash !== user.password_hash || !recovery.isOperator(current)) throw fail(403, 'Backup operator access is no longer available.');
+        };
+        checkOperator();
+        const archive = await recovery.run({ fresh: true });
+        checkOperator();
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${archive.name}"`, 'Content-Length': archive.bytes });
+        await pipeline(createReadStream(archive.path), res);
+        return;
+      }
       if (req.method === 'GET' && path === '/api/auth/me') return send(200, { user: { id: session.user_id, name: session.name, email: session.email }, role: session.role, employeeId: session.employee_id, workspaceId: session.workspace_id });
       if (req.method === 'PATCH' && path === '/api/auth/email') {
         checkAuthLimit(req);
@@ -167,11 +196,17 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
       }
       return send(200, result);
     } catch (e) {
+      if (res.headersSent) { res.destroy(); return; }
       if (!e.status) console.error('Request failed:', e.message);
       send(e.status || 500, { error: e.status ? e.message : 'An internal error occurred.' });
     }
   });
-  server.on('close', () => db.close());
+  let resourcesClosing;
+  server.once('close', () => { resourcesClosing = recovery.stop().finally(() => db.close()); });
+  const closeHttp = server.close;
+  server.close = function (callback) {
+    return closeHttp.call(server, error => { Promise.resolve(resourcesClosing).then(() => callback?.(error), failure => callback?.(failure)); });
+  };
   return server;
 }
 
@@ -188,7 +223,12 @@ export function deploymentOptions(env = process.env) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const { port, host, ...options } = deploymentOptions();
-  const server = createApp(options);
+  const backupConfig = await backupOptions(process.env, options.dataDir);
+  if (backupConfig) {
+    const googleConfig = await googleBackupOptions();
+    if (googleConfig) backupConfig.destination = googleDriveDestination(googleConfig);
+  }
+  const server = createApp({ ...options, backupConfig });
   server.listen(port, host, () => console.log(`Timekeeper listening on ${host}:${port}`));
   const shutdown = () => {
     server.close(() => { process.exitCode = 0; });
