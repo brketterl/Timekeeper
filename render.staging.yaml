@@ -1,0 +1,25 @@
+# Optional separate Blueprint. Select this file and the staging branch in Render.
+# This service must get its own disk, never the production disk.
+services:
+  - type: web
+    name: timekeeper-staging
+    branch: staging
+    runtime: node
+    plan: starter
+    numInstances: 1
+    buildCommand: npm test
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.22.1
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATA_DIR
+        value: /var/data/timekeeper-staging
+    disk:
+      name: timekeeper-staging-data
+      mountPath: /var/data
+      sizeGB: 1

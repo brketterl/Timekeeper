@@ -42,7 +42,7 @@ Code preparation and local integration tests do not prove this deployment works.
 
 ## Updates and backups
 
-Deploy later updates from `main`. Builds run the backend tests before starting the new code. A single SQLite service with a disk can have a short interruption during deployments. Database files remain on the disk; application code comes from GitHub.
+Use [the staging and release workflow](releases.md) for later updates. Keep production on `main` with auto-deploy **Off**, test changes on a separate staging service, then manually deploy the approved `main` commit after review. These dashboard settings must be applied to an existing service; documentation alone does not enable them. Builds run backend tests before starting the new code. A single SQLite service with a disk can have a short interruption during deployments. Database files remain on the disk; application code comes from GitHub.
 
 Before changing production data or deploying a database migration, make a restorable database backup. Use SQLite's online backup tooling, or stop the service before copying the full database state. Keep protected copies outside the hosting disk. Workspace JSON exports are useful additional copies but do not back up accounts. Scheduled independent backups are still an operational step to configure; this Blueprint does not claim to provide them.
 

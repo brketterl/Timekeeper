@@ -4,3 +4,5 @@ node_modules/
 *.sqlite-shm
 *.sqlite-wal
 .env
+playwright-report/
+test-results/

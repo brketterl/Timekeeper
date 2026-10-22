@@ -104,7 +104,17 @@ Browser checks for shared access covered creating employee and admin invitations
 
 The source repository is `https://github.com/brketterl/Timekeeper`. Use its `main` branch as the shared source of truth. Clone it into a new folder on your Mac rather than overwriting a folder containing an existing `.data` database. Keep the old folder until you have backed up its database and verified the new checkout. Never commit `.data`, database files, passwords, or invitation links. GitHub stores code; persistent runtime data remains on the machine hosting the app.
 
-GitHub Actions runs `npm test` on pushes and pull requests with Node.js 24. Hosting/deployment is a separate step.
+Use `staging` for changes and browser review before releasing to `main`. See [Test changes before production](docs/releases.md) for the separate staging service, GitHub branch protections, and manual production deployment settings. Existing Render settings must be changed in the dashboard; a Git push does not change those settings.
+
+GitHub Actions runs the backend tests in both test and production modes, plus Chromium browser smoke tests. To run the browser tests locally:
+
+```sh
+npm ci
+npx playwright install chromium
+npm run test:e2e
+```
+
+The browser tests use a new temporary SQLite database, not the developer's or production's data. Playwright is a development-only dependency; the running server still has no third-party runtime dependencies.
 
 ## Next backend work
 
