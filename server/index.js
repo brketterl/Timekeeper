@@ -40,6 +40,12 @@ async function body(req) {
 
 export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), secureCookies = process.env.NODE_ENV === 'production', allowedOrigin = process.env.APP_ORIGIN } = {}) {
   if (secureCookies && !allowedOrigin) throw Error('APP_ORIGIN is required in production.');
+  if (allowedOrigin) {
+    const origin = new URL(allowedOrigin);
+    if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw Error('APP_ORIGIN must be an HTTP(S) origin without a path.');
+    if (secureCookies && origin.protocol !== 'https:') throw Error('Production requires an HTTPS APP_ORIGIN.');
+    allowedOrigin = origin.origin;
+  }
   const db = openDatabase(dataDir);
   const attempts = new Map();
   const access = accessStore(db);
@@ -154,7 +160,25 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
   return server;
 }
 
+export function deploymentOptions(env = process.env) {
+  const production = env.NODE_ENV === 'production';
+  const port = Number(env.PORT || 3000);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw Error('PORT must be an integer from 1 to 65535.');
+  return {
+    port, host: env.HOST || (production ? '0.0.0.0' : '127.0.0.1'),
+    dataDir: resolve(env.DATA_DIR || '.data'), secureCookies: production,
+    allowedOrigin: env.APP_ORIGIN || env.RENDER_EXTERNAL_URL
+  };
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const port = Number(process.env.PORT || 3000), host = process.env.HOST || '127.0.0.1';
-  createApp().listen(port, host, () => console.log(`Timekeeper listening on ${host}:${port}`));
+  const { port, host, ...options } = deploymentOptions();
+  const server = createApp(options);
+  server.listen(port, host, () => console.log(`Timekeeper listening on ${host}:${port}`));
+  const shutdown = () => {
+    server.close(() => { process.exitCode = 0; });
+    setTimeout(() => server.closeAllConnections(), 10_000).unref();
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 }

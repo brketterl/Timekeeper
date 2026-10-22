@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
-import { createApp } from '../server/index.js';
+import { createApp, deploymentOptions } from '../server/index.js';
 import { createHash } from 'node:crypto';
 import { openDatabase } from '../server/db.js';
 
@@ -121,9 +121,21 @@ test('authentication attempts are rate limited', async t => {
 
 test('production sessions require explicit origin and Secure cookies', async t => {
   assert.throws(() => createApp({ secureCookies: true }), /APP_ORIGIN/);
+  assert.throws(() => createApp({ secureCookies: true, allowedOrigin: 'http://timekeeper.example' }), /HTTPS/);
+  assert.throws(() => createApp({ allowedOrigin: 'https://timekeeper.example/unexpected-path' }), /without a path/);
   const app = await fixture(t, { secureCookies: true, allowedOrigin: 'https://timekeeper.example' });
   const result = await app.request('/api/auth/register', { method: 'POST', data: account, requestOrigin: 'https://timekeeper.example' });
   assert.equal(result.status, 201); assert.match(result.setCookie, /; Secure/);
+});
+
+test('hosting uses the external HTTPS origin, persistent directory, and production interface', () => {
+  const options = deploymentOptions({ NODE_ENV: 'production', PORT: '10000', DATA_DIR: '/var/data/timekeeper', RENDER_EXTERNAL_URL: 'https://timekeeper-example.onrender.com' });
+  assert.equal(options.host, '0.0.0.0'); assert.equal(options.port, 10000);
+  assert.equal(options.dataDir, '/var/data/timekeeper'); assert.equal(options.secureCookies, true);
+  assert.equal(options.allowedOrigin, 'https://timekeeper-example.onrender.com');
+  assert.equal(deploymentOptions({}).host, '127.0.0.1');
+  assert.equal(deploymentOptions({ APP_ORIGIN: 'https://custom.example', RENDER_EXTERNAL_URL: 'https://default.example' }).allowedOrigin, 'https://custom.example');
+  for (const PORT of ['not-a-port', '0', '65536']) assert.throws(() => deploymentOptions({ PORT }), /PORT/);
 });
 
 test('invitations link employees and employee responses exclude billing and other staff', async t => {

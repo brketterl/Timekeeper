@@ -2,6 +2,8 @@
 
 Time and billing app with email/password accounts, server sessions, and SQLite persistence. The original contracts, timesheets, approvals, invoices, payments, printing, and backup UI is retained.
 
+For a shared HTTPS deployment, see [Host Timekeeper on Render](docs/hosting.md). The included `render.yaml` configures one Node service and a persistent SQLite disk.
+
 ## Run
 
 Requires **Node.js 24 or newer**. There are no third-party runtime dependencies and no build step.
@@ -50,12 +52,12 @@ Set variables in the process environment; `.env` files are not loaded automatica
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP listening port |
-| `HOST` | `127.0.0.1` | Listening address |
+| `HOST` | `127.0.0.1` locally; `0.0.0.0` in production | Listening address |
 | `DATA_DIR` | `.data` relative to current directory | Persistent SQLite directory |
 | `NODE_ENV` | unset | Set to `production` for Secure session cookies |
-| `APP_ORIGIN` | local request origin | Required in production; exact public origin, e.g. `https://timekeeper.example.com` |
+| `APP_ORIGIN` | Render-provided `RENDER_EXTERNAL_URL`, otherwise local request origin | Production requires an HTTPS origin; set explicitly for custom domains or other hosts, e.g. `https://timekeeper.example.com` |
 
-Production requires HTTPS in front of this server, `NODE_ENV=production`, and the correct `APP_ORIGIN`. Use a persistent disk for `DATA_DIR`. The current implementation targets one Node process with SQLite; distributed rate limiting and multi-instance deployment need additional work.
+Production requires HTTPS in front of this server, `NODE_ENV=production`, and the correct `APP_ORIGIN` or Render-provided `RENDER_EXTERNAL_URL`. Use a persistent disk for `DATA_DIR`. The current implementation targets one Node process with SQLite; distributed rate limiting and multi-instance deployment need additional work.
 
 ## API
 
