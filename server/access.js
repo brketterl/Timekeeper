@@ -114,6 +114,26 @@ export function accessStore(db) {
       return write(session.workspace_id, doc.data, input.revision);
     });
   }
+  function changeEmail(session, email, verifiedHash, sessionHash) {
+    return transaction(() => {
+      const current = db.prepare(`SELECT u.password_hash FROM users u JOIN sessions s ON s.user_id = u.id
+        JOIN memberships m ON m.user_id = s.user_id AND m.workspace_id = s.workspace_id
+        WHERE u.id = ? AND s.token_hash = ? AND s.expires_at > ?`).get(session.user_id, sessionHash, Date.now());
+      if (!current || current.password_hash !== verifiedHash) throw fail(401, 'Please sign in again.');
+      if (db.prepare('SELECT 1 FROM users WHERE email = ? AND id != ?').get(email, session.user_id)) throw fail(409, 'That email is already used by another account.');
+      const links = db.prepare('SELECT workspace_id, employee_id FROM memberships WHERE user_id = ?').all(session.user_id);
+      for (const link of links) {
+        const doc = document(link.workspace_id);
+        const employee = doc.data.employees.find(e => e.id === link.employee_id);
+        if (!employee) throw fail(409, 'An employee link needs repair before the email can be changed.');
+        employee.email = email;
+        write(link.workspace_id, doc.data, doc.revision);
+        db.prepare('UPDATE invitations SET revoked_at = ? WHERE workspace_id = ? AND employee_id = ? AND accepted_at IS NULL AND revoked_at IS NULL').run(Date.now(), link.workspace_id, employee.id);
+      }
+      db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email, session.user_id);
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(session.user_id);
+    });
+  }
   async function route(path, method, session, input) {
     const current = db.prepare('SELECT role, employee_id FROM memberships WHERE user_id = ? AND workspace_id = ?').get(session.user_id, session.workspace_id);
     if (!current) throw fail(401, 'Workspace access has been removed.');
@@ -127,6 +147,22 @@ export function accessStore(db) {
       return writeEmployee(session, input);
     }
     if (session.role !== 'admin') throw fail(403, 'Admin access is required.');
+    const employeeMatch = /^\/api\/employees\/([a-zA-Z0-9_-]+)\/remove$/.exec(path);
+    if (employeeMatch && method === 'POST') return transaction(() => {
+      const employeeId = employeeMatch[1], doc = document(session.workspace_id);
+      if (input.revision !== doc.revision) throw fail(409, 'The workspace changed. Reload before removing this person.');
+      const employee = doc.data.employees.find(e => e.id === employeeId);
+      if (!employee) throw fail(404, 'Employee not found.');
+      if (members(session.workspace_id).some(m => m.employeeId === employeeId)) throw fail(409, 'This person has sign-in access. Correct your own email in My account, or remove their workspace access before removing the Team record.');
+      const hasHistory = doc.data.sheets.some(s => s.employeeId === employeeId);
+      if (hasHistory) employee.active = false;
+      else doc.data.employees = doc.data.employees.filter(e => e.id !== employeeId);
+      const result = write(session.workspace_id, doc.data, input.revision);
+      db.prepare(`UPDATE invitations SET revoked_at = ? WHERE workspace_id = ? AND accepted_at IS NULL
+        AND revoked_at IS NULL AND (employee_id = ? OR (employee_id IS NULL AND email = ?))`)
+        .run(Date.now(), session.workspace_id, employeeId, employee.email);
+      return { ...result, action: hasHistory ? 'archived' : 'deleted' };
+    });
     if (path === '/api/workspace' && method === 'PUT') return writeAdmin(session, input);
     if (path === '/api/members' && method === 'GET') return members(session.workspace_id);
     if (path === '/api/invitations' && method === 'GET') return db.prepare(`SELECT id, email, role, employee_id AS employeeId,
@@ -169,5 +205,5 @@ export function accessStore(db) {
     });
     throw fail(404, 'Not found.');
   }
-  return { invitation, join, transaction, route };
+  return { invitation, join, transaction, route, changeEmail };
 }

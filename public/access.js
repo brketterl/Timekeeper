@@ -77,3 +77,48 @@ async function revokeInvitation(id) {
   try { await api(`/api/invitations/${id}`, { method: 'DELETE' }); await loadAccessPanel(); }
   catch (error) { toast(error.message); }
 }
+
+async function openAccount() {
+  await saveQueue;
+  if (saveFailure) return toast('Export your unsaved changes and reload first.');
+  try {
+    const { user } = await api('/api/auth/me');
+    showModal('My account', `<form id="account-email-form" class="stack" onsubmit="event.preventDefault();changeAccountEmail(this)">
+      <div id="form-error"></div><p>Correct your sign-in email here. Your employee records will update in every workspace; your hours and invoices will stay in place.</p>
+      <label>Email<input name="email" type="email" maxlength="254" autocomplete="email" required value="${esc(user.email)}"></label>
+      <label>Confirm email<input name="confirmEmail" type="email" maxlength="254" required></label>
+      <label>Current password<input name="currentPassword" type="password" maxlength="256" autocomplete="current-password" required></label>
+      <small>Use your new email next time you sign in. Other signed-in sessions will be signed out. No confirmation email is sent.</small>
+      </form>`, '<button onclick="closeModal()">Cancel</button><button class="primary" type="submit" form="account-email-form">Update email</button>');
+  } catch (error) { toast(error.message); }
+}
+
+async function changeAccountEmail(form) {
+  const fields = new FormData(form);
+  const email = fields.get('email').trim().toLowerCase();
+  if (email !== fields.get('confirmEmail').trim().toLowerCase()) return formError('The email addresses do not match.');
+  const button = document.querySelector('[form=account-email-form]'); button.disabled = true;
+  try {
+    await saveQueue; if (saveFailure) throw Error('Resolve unsaved changes first.');
+    await api('/api/auth/email', { method: 'PATCH', body: JSON.stringify({ email, currentPassword: fields.get('currentPassword') }) });
+    form.reset();
+    const previousView = view;
+    await loadWorkspace(); view = previousView; render(); toast('Sign-in email updated. Use the new email next time.');
+  } catch (error) {
+    form.elements.currentPassword.value = '';
+    if (form.isConnected) formError(error.message); else toast(error.message);
+  } finally { button.disabled = false; }
+}
+
+function removeTeamMember(id) {
+  const person = employee(id);
+  const hasHistory = state.sheets.some(s => s.employeeId === id);
+  confirmModal(hasHistory ? 'Archive this team member?' : 'Delete this team member?',
+    `${person.name}: ${hasHistory ? 'Hide this person from the active team while keeping their timesheet and invoice history.' : 'Remove this unused employee record.'} Pending invitations linked to this record will also be revoked.`, async () => {
+      try {
+        await saveQueue; if (saveFailure) throw Error('Resolve unsaved changes before removing people.');
+        const result = await api(`/api/employees/${id}/remove`, { method: 'POST', body: JSON.stringify({ revision }) });
+        await loadWorkspace(); view = 'team'; render(); toast(result.action === 'archived' ? 'Team member archived; history preserved.' : 'Unused team member deleted.');
+      } catch (error) { toast(error.message); }
+    });
+}

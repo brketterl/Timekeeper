@@ -29,6 +29,10 @@ Every workspace request derives access from the server session and membership. C
 
 The last admin cannot be demoted or removed. Role changes are checked on subsequent requests. Removing membership revokes sessions for that workspace and retains historical employee records. Linked employee records cannot be deleted, archived, or assigned a different account email through workspace edits; remove access first. Sample/reset actions retain linked account records. Restoring a backup must also retain those records. JSON workspace backups do not include memberships or invitation credentials.
 
+To correct a sign-in email, choose **My account** in the header, enter and confirm the new email, and provide your current password. The account and linked employee IDs stay the same, including across multiple workspaces. Other sessions for that account are revoked; the current session is renewed. The new email must not belong to another account. This does not change the business billing email in Settings, and no confirmation email is sent.
+
+To remove an unused employee record, choose **Team → Remove from team**. Records without timesheets are deleted; records with timesheet history are archived so hours and invoices stay intact. Archived records are hidden by default; enable **Show archived** to view or reactivate them through Edit. Pending invitations for the removed record are revoked. For a linked sign-in account, remove access in **Workspace access** first; use My account to correct your own email instead of deleting your profile.
+
 Saves use a revision check to reject stale updates from other tabs or devices. The header distinguishes saving, saved, and unsaved changes. If saving fails, export your changes before reloading the server copy; the app does not silently overwrite newer data.
 
 Back up the database using SQLite's online backup tooling or stop the server before copying its database files. Do not copy only the main database file while WAL writes are active. Keep backups outside the checkout and protect them as sensitive data. The JSON export is an additional workspace-level backup, not an account or session backup.
@@ -69,6 +73,7 @@ All bodies are JSON; mutation requests require an `Origin` matching the applicat
 | `POST` | `/api/auth/login` | `{email,password,inviteToken?}` creates a session and optionally accepts an invitation |
 | `POST` | `/api/auth/logout` | Revokes current session |
 | `GET` | `/api/auth/me` | Returns signed-in identity, employee link, active workspace, and role |
+| `PATCH` | `/api/auth/email` | `{email,currentPassword}` changes only the signed-in account's email, updates all employee links, and renews the session |
 | `GET` | `/api/workspace` | Returns `{data,revision,role,employeeId,workspaceId}`; employee data is redacted |
 | `PUT` | `/api/workspace` | Admin-only; validates and saves `{data,revision}`; returns new revision; stale revision returns 409 |
 | `GET` | `/api/workspaces` | Lists the signed-in account’s workspace memberships |
@@ -76,6 +81,7 @@ All bodies are JSON; mutation requests require an `Origin` matching the applicat
 | `PUT` | `/api/employee/timesheets` | Employee-only `{sheets,revision}` saves own hours; rates and identities are enforced by the server |
 | `GET` | `/api/members` | Admin-only member list |
 | `PATCH` / `DELETE` | `/api/members/:userId` | Admin-only role change `{role}` or access removal |
+| `POST` | `/api/employees/:id/remove` | Admin-only `{revision}` deletes an unlinked unused record or archives one with timesheet history |
 | `GET` / `POST` | `/api/invitations` | Admin-only list or creation `{email,role,employeeId?}`; creation returns token once |
 | `DELETE` | `/api/invitations/:id` | Admin-only pending invitation revocation |
 | `POST` | `/api/invitations/preview` | Public token lookup `{token}`; reports workspace, invitee email, and role |

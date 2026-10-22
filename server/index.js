@@ -49,6 +49,14 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
   const db = openDatabase(dataDir);
   const attempts = new Map();
   const access = accessStore(db);
+  function checkAuthLimit(req) {
+    const now = Date.now();
+    for (const [key, entry] of attempts) if (entry.until < now) attempts.delete(key);
+    const key = req.socket.remoteAddress;
+    const entry = attempts.get(key) || { count: 0, until: now + 15 * 60_000 };
+    if (++entry.count > 20) throw fail(429, 'Too many attempts. Try again in 15 minutes.');
+    attempts.set(key, entry);
+  }
   const cookie = (token, maxAge) => `timekeeper_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secureCookies ? '; Secure' : ''}`;
   function issueSession(res, userId, workspaceId) {
     const token = randomBytes(32).toString('hex');
@@ -81,11 +89,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
       }
       if (req.method === 'POST' && ['/api/auth/register', '/api/auth/login', '/api/invitations/preview'].includes(path)) {
         const now = Date.now();
-        for (const [key, entry] of attempts) if (entry.until < now) attempts.delete(key);
-        const key = req.socket.remoteAddress;
-        const entry = attempts.get(key) || { count: 0, until: now + 15 * 60_000 };
-        if (++entry.count > 20) throw fail(429, 'Too many attempts. Try again in 15 minutes.');
-        attempts.set(key, entry);
+        checkAuthLimit(req);
         const input = await body(req);
         if (path === '/api/invitations/preview') {
           const invite = access.invitation(input.token);
@@ -132,6 +136,17 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         WHERE token_hash = ? AND expires_at > ?`).get(digest(token), Date.now());
       if (!session) throw fail(401, 'Please sign in.');
       if (req.method === 'GET' && path === '/api/auth/me') return send(200, { user: { id: session.user_id, name: session.name, email: session.email }, role: session.role, employeeId: session.employee_id, workspaceId: session.workspace_id });
+      if (req.method === 'PATCH' && path === '/api/auth/email') {
+        checkAuthLimit(req);
+        const input = await body(req);
+        const email = typeof input.email === 'string' ? input.email.trim().toLowerCase() : '';
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254 || typeof input.currentPassword !== 'string' || input.currentPassword.length > 256) throw fail(400, 'Enter a valid email and your current password.');
+        const user = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(session.user_id);
+        if (!await checkPassword(input.currentPassword, user?.password_hash)) throw fail(401, 'Your current password is incorrect.');
+        access.changeEmail(session, email, user.password_hash, digest(token));
+        issueSession(res, session.user_id, session.workspace_id);
+        return send(200, { email });
+      }
       if (req.method === 'POST' && path === '/api/auth/logout') {
         db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(digest(token));
         res.setHeader('Set-Cookie', cookie('', 0)); return send(200, { ok: true });

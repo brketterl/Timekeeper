@@ -295,3 +295,91 @@ test('schema migration upgrades existing owners without losing workspace data or
   const repeated = openDatabase(directory);
   assert.equal(repeated.prepare('SELECT revision FROM workspace_documents').get().revision, 8); repeated.close();
 });
+
+test('account email correction requires a password, preserves identity, and rotates sessions', async t => {
+  const { app, admin, worker } = await setupShared(t);
+  const oldDoc = (await app.request('/api/workspace', { cookie: admin.cookie })).body;
+  const secondSession = await app.request('/api/auth/login', { method: 'POST', data: account });
+  const change = data => app.request('/api/auth/email', { method: 'PATCH', cookie: admin.cookie, data });
+  assert.equal((await app.request('/api/auth/email', { method: 'PATCH', data: { email: 'new@example.com', currentPassword: account.password } })).status, 401);
+  assert.equal((await change({ email: 'new@example.com', currentPassword: 'wrong' })).status, 401);
+  assert.equal((await change({ email: 'invalid-email', currentPassword: account.password })).status, 400);
+  assert.equal((await change({ email: 'worker@example.com', currentPassword: account.password })).status, 409);
+  const changed = await change({ email: ' NEW@example.com ', currentPassword: account.password });
+  assert.equal(changed.status, 200); assert.equal(changed.body.email, 'new@example.com');
+  assert.notEqual(changed.cookie, admin.cookie);
+  assert.equal((await app.request('/api/auth/me', { cookie: admin.cookie })).status, 401);
+  assert.equal((await app.request('/api/auth/me', { cookie: secondSession.cookie })).status, 401);
+  assert.equal((await app.request('/api/auth/me', { cookie: worker.cookie })).status, 200);
+  const me = (await app.request('/api/auth/me', { cookie: changed.cookie })).body;
+  assert.equal(me.user.id, admin.body.user.id); assert.equal(me.user.email, 'new@example.com'); assert.equal(me.role, 'admin');
+  const doc = (await app.request('/api/workspace', { cookie: changed.cookie })).body;
+  assert.equal(doc.employeeId, oldDoc.employeeId); assert.equal(doc.revision, oldDoc.revision + 1);
+  assert.equal(doc.data.employees.find(e => e.id === doc.employeeId).email, 'new@example.com');
+  assert.deepEqual(doc.data.settings, oldDoc.data.settings);
+  assert.deepEqual(doc.data.contracts, oldDoc.data.contracts);
+  assert.equal((await app.request('/api/auth/login', { method: 'POST', data: account })).status, 401);
+  assert.equal((await app.request('/api/auth/login', { method: 'POST', data: { ...account, email: 'new@example.com' } })).status, 200);
+});
+
+test('email correction updates all workspace links without allowing changes to other accounts', async t => {
+  const { app, admin, worker } = await setupShared(t);
+  const invitation = await app.request('/api/invitations', { method: 'POST', cookie: admin.cookie, data: { email: 'other@example.com', role: 'admin' } });
+  const other = await app.request('/api/auth/register', { method: 'POST', data: { ...account, email: 'other@example.com' } });
+  const joined = await app.request('/api/invitations/accept', { method: 'POST', cookie: other.cookie, data: { token: invitation.body.token } });
+  const changed = await app.request('/api/auth/email', { method: 'PATCH', cookie: joined.cookie, data: { email: 'corrected@example.com', currentPassword: account.password, userId: admin.body.user.id } });
+  assert.equal(changed.status, 200);
+  const list = (await app.request('/api/workspaces', { cookie: changed.cookie })).body;
+  assert.equal(list.length, 2);
+  const db = new DatabaseSync(join(app.directory, 'timekeeper.sqlite'));
+  const links = db.prepare(`SELECT d.data, m.employee_id FROM memberships m JOIN workspace_documents d ON d.workspace_id=m.workspace_id WHERE m.user_id=?`).all(other.body.user.id);
+  for (const link of links) assert.equal(JSON.parse(link.data).employees.find(e => e.id === link.employee_id).email, 'corrected@example.com');
+  assert.equal(db.prepare('SELECT email FROM users WHERE id=?').get(admin.body.user.id).email, account.email); db.close();
+  const employeeChange = await app.request('/api/auth/email', { method: 'PATCH', cookie: worker.cookie, data: { email: 'worker-fixed@example.com', currentPassword: account.password } });
+  assert.equal(employeeChange.status, 200);
+  assert.equal((await app.request('/api/workspace', { cookie: employeeChange.cookie })).body.role, 'employee');
+  assert.equal((await app.request('/api/members', { cookie: employeeChange.cookie })).status, 403);
+});
+
+test('admins delete unused employee records and revoke invites; linked accounts and other workspaces are protected', async t => {
+  const { app, admin, worker, invitation } = await setupShared(t);
+  const doc = (await app.request('/api/workspace', { cookie: admin.cookie })).body;
+  doc.data.employees.push({ id: 'unwanted', name: 'Unused record', email: 'unwanted@example.com', active: true, contracts: [] });
+  await app.request('/api/workspace', { method: 'PUT', cookie: admin.cookie, data: { data: doc.data, revision: doc.revision } });
+  const pending = await app.request('/api/invitations', { method: 'POST', cookie: admin.cookie, data: { email: 'unwanted@example.com', role: 'employee', employeeId: 'unwanted' } });
+  const current = (await app.request('/api/workspace', { cookie: admin.cookie })).body;
+  const remove = (id, cookie = admin.cookie, revision = current.revision) => app.request(`/api/employees/${id}/remove`, { method: 'POST', cookie, data: { revision } });
+  assert.equal((await remove('unwanted', worker.cookie)).status, 403);
+  assert.equal((await remove('missing')).status, 404);
+  assert.equal((await remove('unwanted', admin.cookie, doc.revision)).status, 409);
+  assert.equal((await remove(current.employeeId)).status, 409);
+  assert.equal((await remove('worker')).status, 409);
+  const removed = await remove('unwanted');
+  assert.equal(removed.status, 200); assert.equal(removed.body.action, 'deleted');
+  const updated = (await app.request('/api/workspace', { cookie: admin.cookie })).body;
+  assert.equal(updated.data.employees.some(e => e.id === 'unwanted'), false);
+  assert.equal((await app.request('/api/invitations/preview', { method: 'POST', data: { token: pending.body.token } })).status, 410);
+  assert.equal((await app.request('/api/invitations/preview', { method: 'POST', data: { token: invitation.body.token } })).status, 410);
+  const outsider = await app.request('/api/auth/register', { method: 'POST', data: { ...account, email: 'outside@example.com' } });
+  const outsideDoc = (await app.request('/api/workspace', { cookie: outsider.cookie })).body;
+  assert.equal((await remove('worker', outsider.cookie, outsideDoc.revision)).status, 404);
+});
+
+test('former first admin with invoice history can be archived without losing financial records', async t => {
+  const { app, admin, worker } = await setupShared(t);
+  const doc = (await app.request('/api/workspace', { cookie: admin.cookie })).body;
+  const formerId = doc.employeeId;
+  const sheet = { id: 'historical-sheet', employeeId: formerId, start: '2026-10-01', status: 'approved', rows: [{ id: 'historical-row', contractId: 'assigned', rate: 12500, status: 'approved', note: 'Historical work', hours: { '2026-10-01': 8 } }] };
+  const invoice = { id: 'historical-invoice', number: 'INV-1001', contractId: 'assigned', client: 'Client A', contract: 'Assigned work', email: 'billing@example.com', address: '', business: { ...doc.data.settings }, issued: '2026-10-02', due: '2026-10-31', sentDate: null, lines: [{ sources: [{ sheetId: sheet.id, rowId: sheet.rows[0].id }], description: 'Historical work', employee: 'Owner', start: sheet.start, end: '2026-10-15', hours: 8, rate: 12500, amount: 100000 }], payments: [], note: '' };
+  doc.data.sheets.push(sheet); doc.data.invoices.push(invoice);
+  assert.equal((await app.request('/api/workspace', { method: 'PUT', cookie: admin.cookie, data: { data: doc.data, revision: doc.revision } })).status, 200);
+  await app.request(`/api/members/${worker.body.user.id}`, { method: 'PATCH', cookie: admin.cookie, data: { role: 'admin' } });
+  assert.equal((await app.request(`/api/members/${admin.body.user.id}`, { method: 'DELETE', cookie: worker.cookie })).status, 200);
+  const current = (await app.request('/api/workspace', { cookie: worker.cookie })).body;
+  const archived = await app.request(`/api/employees/${formerId}/remove`, { method: 'POST', cookie: worker.cookie, data: { revision: current.revision } });
+  assert.equal(archived.status, 200); assert.equal(archived.body.action, 'archived');
+  const result = (await app.request('/api/workspace', { cookie: worker.cookie })).body;
+  assert.equal(result.data.employees[0].id, formerId); assert.equal(result.data.employees[0].active, false);
+  assert.deepEqual(result.data.sheets, [sheet]); assert.deepEqual(result.data.invoices, [invoice]);
+  assert.equal((await app.request('/api/auth/me', { cookie: admin.cookie })).status, 401);
+});
