@@ -13,7 +13,9 @@ async function fixture(t, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'timekeeper-test-'));
   let server;
   async function start() {
-    server = createApp({ dataDir: directory, ...options });
+    // Test HTTP servers must not inherit the hosting process's cookies or origin.
+    // Explicit production-cookie tests override these defaults below.
+    server = createApp({ dataDir: directory, secureCookies: false, allowedOrigin: null, ...options });
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     return `http://127.0.0.1:${server.address().port}`;
   }
@@ -120,7 +122,7 @@ test('authentication attempts are rate limited', async t => {
 });
 
 test('production sessions require explicit origin and Secure cookies', async t => {
-  assert.throws(() => createApp({ secureCookies: true }), /APP_ORIGIN/);
+  assert.throws(() => createApp({ secureCookies: true, allowedOrigin: null }), /APP_ORIGIN/);
   assert.throws(() => createApp({ secureCookies: true, allowedOrigin: 'http://timekeeper.example' }), /HTTPS/);
   assert.throws(() => createApp({ allowedOrigin: 'https://timekeeper.example/unexpected-path' }), /without a path/);
   const app = await fixture(t, { secureCookies: true, allowedOrigin: 'https://timekeeper.example' });

@@ -3,6 +3,14 @@ on: [push, pull_request]
 jobs:
   backend:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-env: [test, production]
+    env:
+      NODE_ENV: ${{ matrix.node-env }}
+      APP_ORIGIN: https://timekeeper-ci.example
+      RENDER_EXTERNAL_URL: https://timekeeper-ci.onrender.com
+      DATA_DIR: /var/data/timekeeper
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
