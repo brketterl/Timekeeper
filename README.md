@@ -124,8 +124,10 @@ The browser tests use a new temporary SQLite database, not the developer's or pr
 
 - Email verification, password reset, and account recovery (not implemented yet).
 - Resource-level business APIs, normalized financial tables, and an audit history.
-- Backup failure notifications and operational monitoring. Google connectivity and off-site restore checks require your own configured account.
+- Independent monitoring for a completely stopped service. Google/R2 connectivity and off-site restore checks require your own configured account.
 
 Invoice sending currently records a date; it does not send email. Payments are recorded manually and are not processed by the app.
 
 Cloudflare R2 encrypted recovery backups are supported on staging; see [R2 setup and restore checks](docs/backups.md#cloudflare-r2-recommended-alternative-to-google-drive). No additional Render service is required.
+
+Optional [backup alert emails through Resend](docs/backup-alerts.md) notify the server operator about failed backups, 48-hour overdue off-site uploads, and recovery. Configure separately after testing; alerts are disabled by default.

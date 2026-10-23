@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { openDatabase } from './db.js';
 import { accessStore } from './access.js';
+import { emailOptions, resendSender } from './email.js';
 import { backupOptions, backupService } from './backups.js';
 import { r2BackupOptions, r2Destination } from './r2-backups.js';
 import { googleBackupOptions, googleDriveDestination } from './google-backups.js';
@@ -145,8 +146,8 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         if (session.role !== 'admin') throw fail(403, 'Admin access is required.');
         return send(200, { ...recovery.status(), canDownload: recovery.isOperator(session) });
       }
-      if (req.method === 'POST' && path === '/api/backups/download') {
-        if (!recovery.isOperator(session)) throw fail(403, 'Only the configured server backup operator can download recovery archives.');
+      if (req.method === 'POST' && ['/api/backups/download', '/api/backups/test-alert'].includes(path)) {
+        if (!recovery.isOperator(session)) throw fail(403, 'Only the configured server backup operator can perform this action.');
         checkAuthLimit(req);
         const input = await body(req);
         if (typeof input.currentPassword !== 'string' || input.currentPassword.length > 256) throw fail(400, 'Enter your current password.');
@@ -159,6 +160,11 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
           if (!current || current.password_hash !== user.password_hash || !recovery.isOperator(current)) throw fail(403, 'Backup operator access is no longer available.');
         };
         checkOperator();
+        if (path === '/api/backups/test-alert') {
+          if (!recovery.status().alerts.enabled) throw fail(400, 'Backup email alerts are not enabled.');
+          try { await recovery.testAlert(); } catch { throw fail(503, 'Test email was not accepted. Check alert configuration or wait a minute before retrying.'); }
+          return send(200, { ok: true });
+        }
         const archive = await recovery.run({ fresh: true });
         checkOperator();
         res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${archive.name}"`, 'Content-Length': archive.bytes });
@@ -225,12 +231,18 @@ export function deploymentOptions(env = process.env) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const { port, host, ...options } = deploymentOptions();
   const backupConfig = await backupOptions(process.env, options.dataDir);
+  const alertConfig = await emailOptions();
+  if (alertConfig && !backupConfig) throw Error('Backup alerts require BACKUP_ENABLED=true.');
   if (backupConfig) {
     const googleConfig = await googleBackupOptions();
     const r2Config = await r2BackupOptions();
     if (googleConfig && r2Config) throw Error('Configure only one off-site backup destination: Google Drive or R2.');
     if (r2Config) backupConfig.destination = r2Destination(r2Config);
     else if (googleConfig) backupConfig.destination = googleDriveDestination(googleConfig);
+    if (alertConfig) {
+      if (!backupConfig.destination) throw Error('Backup alerts require a configured off-site destination.');
+      backupConfig.alerts = { send: resendSender(alertConfig) };
+    }
   }
   const server = createApp({ ...options, backupConfig });
   server.listen(port, host, () => console.log(`Timekeeper listening on ${host}:${port}`));

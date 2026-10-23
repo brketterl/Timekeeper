@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } 
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pipeline } from 'node:stream/promises';
+import { backupAlerts } from './backup-alerts.js';
 import { validBackup } from './validation.js';
 
 const MAGIC = Buffer.from('TKBACKUP1\n');
@@ -143,11 +144,12 @@ export async function backupOptions(env, dataDir) {
 
 export function backupService(db, config, { destination = null, now = Date.now, autoStart = true, logger = console } = {}) {
   let running = null, timer = null, stopped = false;
+  const alerts = config?.alerts ? backupAlerts({ ...config.alerts, directory: config.directory, now, logger }) : null;
   let state = { lastSuccessAt: null, lastLocalAt: null, lastOffsiteAt: null, lastErrorAt: null, error: null, name: null, destinationId: destination?.identity || null };
   const intervalMs = config?.intervalMs || 24 * 3600_000;
   const dueAt = () => state.error && state.lastErrorAt ? Date.parse(state.lastErrorAt) + 15 * 60_000 : state.lastSuccessAt ? Date.parse(state.lastSuccessAt) + intervalMs : now();
   const status = () => ({ enabled: Boolean(config), intervalHours: intervalMs / 3600_000, retain: config?.retain || 0, running: Boolean(running),
-    offsiteConfigured: Boolean(destination), ...Object.fromEntries(['lastSuccessAt', 'lastLocalAt', 'lastOffsiteAt', 'lastErrorAt', 'error'].map(k => [k, state[k]])),
+    offsiteConfigured: Boolean(destination), alerts: alerts?.status() || { enabled: false }, ...Object.fromEntries(['lastSuccessAt', 'lastLocalAt', 'lastOffsiteAt', 'lastErrorAt', 'error'].map(k => [k, state[k]])),
     nextRunAt: config ? new Date(dueAt()).toISOString() : null });
   async function persist() {
     const path = join(config.directory, 'backup-status.json');
@@ -211,7 +213,10 @@ export function backupService(db, config, { destination = null, now = Date.now, 
         await persist().catch(() => {});
         logger.error('Recovery backup failed:', error.code || 'BACKUP_FAILED');
         throw error;
-      } finally { running = null; }
+      } finally {
+        await alerts?.check(status());
+        running = null;
+      }
     })();
     return running;
   }
@@ -221,12 +226,16 @@ export function backupService(db, config, { destination = null, now = Date.now, 
       await ready;
       if (now() >= dueAt()) await run();
     } catch { /* Status and logs retain failures; don't take down the application. */ }
+    await alerts?.check(status());
   }
   async function tick() {
     await checkDue();
     if (!stopped) { timer = setTimeout(tick, 60_000); timer.unref(); }
   }
   if (autoStart && config) void tick();
-  return { run, status, ready, checkDue, isOperator: session => Boolean(config && session.role === 'admin' && config.operators.includes(session.email.toLowerCase())),
-    async stop() { stopped = true; clearTimeout(timer); if (running) await running.catch(() => {}); await ready.catch(() => {}); } };
+  return { run, status, ready, checkDue, testAlert: () => {
+    if (!alerts) throw Error('Backup email alerts are not enabled.');
+    return alerts.test();
+  }, isOperator: session => Boolean(config && session.role === 'admin' && config.operators.includes(session.email.toLowerCase())),
+    async stop() { stopped = true; clearTimeout(timer); if (running) await running.catch(() => {}); await ready.catch(() => {}); await alerts?.stop(); } };
 }

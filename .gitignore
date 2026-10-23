@@ -11,3 +11,5 @@ test-results/
 timekeeper-google-backup.json
 
 timekeeper-r2-backup.json
+
+timekeeper-resend.key

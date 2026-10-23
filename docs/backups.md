@@ -91,7 +91,7 @@ Keep `DATA_DIR=/var/data/timekeeper`. Remove any Google backup credential config
 
 After the approved release and deployment, confirm both the Settings timestamp and an actual R2 object, then download that R2 object and perform a local restore check with the same encryption key. Until this is done, off-site recovery is unverified.
 
-Each upload contains only encrypted ciphertext. The app sends a content checksum and downloads the stored object to compare its SHA-256 and size before pruning. Defaults retain the latest seven managed archives locally and in R2. Only matching archive filenames under the dedicated `timekeeper/v1/` prefix are eligible for cleanup. A failed upload, verification, or incomplete listing prevents pruning. Read-back verification adds a download request per backup; storage/request costs depend on Cloudflare's current allowances. Check status regularly; there are no email failure alerts.
+Each upload contains only encrypted ciphertext. The app sends a content checksum and downloads the stored object to compare its SHA-256 and size before pruning. Defaults retain the latest seven managed archives locally and in R2. Only matching archive filenames under the dedicated `timekeeper/v1/` prefix are eligible for cleanup. A failed upload, verification, or incomplete listing prevents pruning. Read-back verification adds a download request per backup; storage/request costs depend on Cloudflare's current allowances. Check status regularly; optional [Resend email alerts](backup-alerts.md) can report failures and overdue uploads when configured.
 
 ## 2. Connect Google Drive / Google One
 
@@ -180,7 +180,7 @@ Deploy/restart the existing service. It takes a snapshot on first start, then fo
 3. Download that copy from Drive to your Mac. Run `backup:verify` and restore it into a new local directory using the commands above.
 4. Sign in to the recovered local copy and check its data. Record the date of this restore check. Repeat periodically and before relying on a new key or destination.
 
-Google authentication, permissions, network failures, a full Drive quota, or a full Render disk can stop new backups. The app keeps serving requests and shows an error; older verified copies are preserved if a new archive cannot be verified. Logs identify backup failure codes without printing encryption keys or OAuth credentials. Check Settings regularly; this version has no email/SMS failure alerts.
+Google authentication, permissions, network failures, a full Drive quota, or a full Render disk can stop new backups. The app keeps serving requests and shows an error; older verified copies are preserved if a new archive cannot be verified. Logs identify backup failure codes without printing encryption keys or OAuth credentials. Check Settings regularly; configure [backup alert emails](backup-alerts.md) for failure, 48-hour overdue, and recovery notices. SMS alerts are not provided.
 
 ## Disaster recovery / rollback
 

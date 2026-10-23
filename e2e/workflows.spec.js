@@ -128,6 +128,13 @@ test('configured backup operator downloads an encrypted recovery archive from Se
   await register(page, 'Backup operator', `backup-operator-${info.retry}@example.test`);
   await page.locator('nav button[title=Settings]').click();
   await expect(page.locator('#recovery-backups')).toContainText('These copies are on the server disk only.');
+  await expect(page.locator('#recovery-backups')).toContainText('Email alerts enabled');
+  await page.getByRole('button', { name: 'Send test backup alert', exact: true }).click();
+  await page.getByLabel('Current password', { exact: true }).fill(password);
+  await page.getByRole('button', { name: 'Send test email', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('#recovery-backups')).not.toContainText('Last email accepted: None yet');
+
   await page.getByRole('button', { name: 'Create and download encrypted recovery copy', exact: true }).click();
   await page.getByLabel('Current password', { exact: true }).fill(password);
   const downloadPromise = page.waitForEvent('download');

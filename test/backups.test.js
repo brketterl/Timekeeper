@@ -223,6 +223,53 @@ test('recovery downloads require a configured server operator, password and same
   } finally { await new Promise(r => server.close(r)); }
 });
 
+test('email outages never turn a verified backup into a failure', async t => {
+  const f = await fixture(t); let failUpload = true;
+  const service = backupService(f.db, { directory: f.directory, key: f.key, retain: 2, intervalMs: 86400_000, operators: [],
+    alerts: { send: async () => { throw Error('email provider down'); } } },
+    { autoStart: false, logger: { error() {} }, destination: { identity: 'test', upload: async () => { if (failUpload) throw Error('upload down'); } } });
+  await assert.rejects(service.run(), /upload down/);
+  assert.match(service.status().alerts.error, /delivery failed/);
+  failUpload = false; await service.run();
+  assert.equal(service.status().error, null); assert(service.status().lastOffsiteAt);
+  await service.stop();
+});
+
+test('scheduler checks overdue alerts even when a weekly backup is not due', async t => {
+  const f = await fixture(t); let clock = Date.now(); const sent = [];
+  const service = backupService(f.db, { directory: f.directory, key: f.key, retain: 2, intervalMs: 168 * 3600_000, operators: [],
+    alerts: { send: async email => sent.push(email) } },
+    { autoStart: false, now: () => clock, logger: { error() {} }, destination: { identity: 'weekly-test', upload: async () => {} } });
+  await service.run(); assert.equal(sent.length, 0);
+  clock += 48 * 3600_000; await service.checkDue();
+  assert.equal(sent.length, 1); assert.match(sent[0].subject, /overdue/);
+  await service.stop();
+});
+
+test('test-alert endpoint enforces operator role, current password, origin, and fixed message', async t => {
+  const f = await fixture(t), sent = [];
+  const server = createApp({ dataDir: f.dataDir, secureCookies: false, allowedOrigin: null,
+    backupConfig: { directory: f.directory, key: f.key, retain: 2, intervalMs: 86400_000, operators: ['admin@example.test'],
+      alerts: { send: async email => sent.push(email) } } });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const login = async email => (await fetch(origin + '/api/auth/login', { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) })).headers.get('set-cookie').split(';')[0];
+  const request = (cookie, currentPassword = password, requestOrigin = origin) => fetch(origin + '/api/backups/test-alert', {
+    method: 'POST', headers: { Cookie: cookie, Origin: requestOrigin, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ currentPassword, to: 'attacker@example.test', text: 'arbitrary text' }) });
+  try {
+    const admin = await login('admin@example.test'), employee = await login('employee@example.test'), other = await login('other@example.test');
+    assert.equal((await request('')).status, 401);
+    assert.equal((await request(employee)).status, 403); assert.equal((await request(other)).status, 403);
+    assert.equal((await request(admin, 'wrong')).status, 401);
+    assert.equal((await request(admin, password, 'https://attacker.example')).status, 403);
+    assert.equal(sent.length, 0);
+    assert.equal((await request(admin)).status, 200); assert.equal(sent.length, 1);
+    assert.equal(sent[0].to, undefined); assert(!sent[0].text.includes('arbitrary text'));
+    assert.equal((await request(admin)).status, 503); assert.equal(sent.length, 1);
+  } finally { await new Promise(r => server.close(r)); }
+});
+
 test('Google upload redirects and incomplete retention listings never delete older copies', async t => {
   const f = await fixture(t), archive = await createArchive(f.db, f.directory, f.key);
   const config = { clientId: 'client', clientSecret: 'secret', refreshToken: 'refresh', folderId: 'folder' };
@@ -282,7 +329,7 @@ test('production entrypoint enables scheduled backups from secure configuration'
     cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], env: {
       ...Object.fromEntries(
         Object.entries(process.env).filter(
-          ([name]) => !/^(BACKUP_|GOOGLE_BACKUP_|R2_BACKUP_)/.test(name)
+          ([name]) => !/^(BACKUP_|GOOGLE_BACKUP_|R2_BACKUP_|RESEND_|EMAIL_)/.test(name)
         )
       ), NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), DATA_DIR: f.dataDir, APP_ORIGIN: '', RENDER_EXTERNAL_URL: publicOrigin,
       BACKUP_ENABLED: 'true', BACKUP_KEY_FILE: keyFile, BACKUP_ENCRYPTION_KEY: '', BACKUP_DIR: f.directory, BACKUP_OPERATOR_EMAILS: 'admin@example.test',
