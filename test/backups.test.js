@@ -195,8 +195,10 @@ test('Google uploads ciphertext, verifies receipt and paginates before scoped re
 
 test('recovery downloads require a configured server operator, password and same-origin request', async t => {
   const f = await fixture(t);
-  const server = createApp({ dataDir: f.dataDir, secureCookies: false, allowedOrigin: null,
-    backupConfig: { directory: f.directory, key: f.key, retain: 2, intervalMs: 86400_000, operators: ['admin@example.test'] } });
+  const server = createApp({
+    dataDir: f.dataDir, secureCookies: false, allowedOrigin: null,
+    backupConfig: { directory: f.directory, key: f.key, retain: 2, intervalMs: 86400_000, operators: ['admin@example.test'] }
+  });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const origin = `http://127.0.0.1:${server.address().port}`;
   const login = async email => {
@@ -276,11 +278,17 @@ test('production entrypoint enables scheduled backups from secure configuration'
   const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
   const port = probe.address().port; await new Promise(r => probe.close(r));
   const publicOrigin = 'https://backup-test.onrender.com';
-  const child = spawn(process.execPath, ['server/index.js'], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], env: {
-    ...process.env, NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), DATA_DIR: f.dataDir, APP_ORIGIN: '', RENDER_EXTERNAL_URL: publicOrigin,
-    BACKUP_ENABLED: 'true', BACKUP_KEY_FILE: keyFile, BACKUP_ENCRYPTION_KEY: '', BACKUP_DIR: f.directory, BACKUP_OPERATOR_EMAILS: 'admin@example.test',
-    BACKUP_INTERVAL_HOURS: '24', BACKUP_RETAIN: '2', GOOGLE_BACKUP_CREDENTIALS_FILE: '', GOOGLE_BACKUP_CLIENT_ID: '', GOOGLE_BACKUP_CLIENT_SECRET: '', GOOGLE_BACKUP_REFRESH_TOKEN: '', GOOGLE_BACKUP_FOLDER_ID: ''
-  } });
+  const child = spawn(process.execPath, ['server/index.js'], {
+    cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], env: {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([name]) => !/^(BACKUP_|GOOGLE_BACKUP_|R2_BACKUP_)/.test(name)
+        )
+      ), NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), DATA_DIR: f.dataDir, APP_ORIGIN: '', RENDER_EXTERNAL_URL: publicOrigin,
+      BACKUP_ENABLED: 'true', BACKUP_KEY_FILE: keyFile, BACKUP_ENCRYPTION_KEY: '', BACKUP_DIR: f.directory, BACKUP_OPERATOR_EMAILS: 'admin@example.test',
+      BACKUP_INTERVAL_HOURS: '24', BACKUP_RETAIN: '2', GOOGLE_BACKUP_CREDENTIALS_FILE: '', GOOGLE_BACKUP_CLIENT_ID: '', GOOGLE_BACKUP_CLIENT_SECRET: '', GOOGLE_BACKUP_REFRESH_TOKEN: '', GOOGLE_BACKUP_FOLDER_ID: ''
+    }
+  });
   t.after(() => { if (child.exitCode === null) child.kill('SIGTERM'); });
   let errorText = ''; child.stderr.on('data', data => { errorText += data; });
   await Promise.race([once(child.stdout, 'data'), once(child, 'exit').then(() => { throw Error('Backup server failed to start: ' + errorText); })]);
