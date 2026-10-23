@@ -7,11 +7,11 @@ This feature is developed on `staging`. Test it locally before approving release
 - SQLite's online backup API captures a consistent database, including committed WAL data, while the app runs.
 - Recovery archives include every hosted workspace, user/password hash, membership, contract, timesheet, invoice, and payment. They are not workspace JSON exports.
 - Archives use AES-256-GCM with a random nonce and an authenticated metadata header. Every new archive is decrypted again and checked for database integrity, foreign-key errors, valid workspace data, and account/employee links before it is retained.
-- Defaults: one backup every 24 hours, seven verified local copies, and seven Google Drive copies when Drive is configured. This is a latest-seven-copies policy, not guaranteed seven days of history: manual backups also count. Only files created and marked by this application are eligible for cleanup. Drive cleanup permanently deletes older managed copies after a verified replacement upload; unrelated files are left alone.
-- Failed Google uploads retry after 15 minutes. Retries reuse the verified pending local snapshot during the current backup interval to avoid filling the disk with duplicates. The Settings panel shows failures and separate local/Google timestamps.
+- Defaults: one backup every 24 hours, seven verified local copies, and seven off-site copies when R2 or Google Drive is configured. This is a latest-seven-copies policy, not guaranteed seven days of history: manual backups also count. Only files created and marked by this application are eligible for cleanup. Drive cleanup permanently deletes older managed copies after a verified replacement upload; unrelated files are left alone.
+- Failed off-site uploads retry after 15 minutes. Retries reuse the verified pending local snapshot during the current backup interval to avoid filling the disk with duplicates. The Settings panel shows failures and separate local/off-site timestamps.
 - Restore clears all sessions and revokes pending invitations so old access links are not revived. People sign in again with their backed-up email/password. Existing accepted memberships are preserved.
 
-Backups protect data only up to their capture time. A daily schedule can lose up to approximately a day of changes after a disaster, or more if backups are failing. Check the latest successful timestamps. Disk-only copies do not protect against losing the disk; Google Drive or downloaded off-site copies are needed. The existing persistent disk must have room for the source database, retained full copies, and temporary snapshot/encryption files.
+Backups protect data only up to their capture time. A daily schedule can lose up to approximately a day of changes after a disaster, or more if backups are failing. Check the latest successful timestamps. Disk-only copies do not protect against losing the disk; R2, Google Drive, or downloaded off-site copies are needed. The existing persistent disk must have room for the source database, retained full copies, and temporary snapshot/encryption files.
 
 ## 1. Generate and save an encryption key on your Mac
 
@@ -30,6 +30,68 @@ export BACKUP_KEY_FILE="$HOME/.config/timekeeper-backups/timekeeper.backup.key"
 ```
 
 The file contains the actual base64 key; never use the filename as `BACKUP_ENCRYPTION_KEY`. Use either the key-file variable or the key-value variable, not both. Key rotation requires retaining old keys for archives created with those keys.
+
+## Cloudflare R2 (recommended alternative to Google Drive)
+
+Use **one** off-site provider. R2 uses the existing Render process; no second Render instance is needed. These changes must pass local review and be released before configuring production.
+
+### What you do in Cloudflare
+
+1. Create/sign in to your Cloudflare account and open **R2 Object Storage**. Activate R2; Cloudflare may require billing details even within its free allowance. Check current pricing and set billing notifications if available.
+2. Create a dedicated bucket named, for example, `timekeeper-backups`. Choose **Standard** storage. Leave public access, the public development URL, and custom domains disabled. No CORS configuration is needed. Do not add lifecycle deletion rules: the app manages retention.
+3. Under R2's API tokens, create an R2 token with **Object Read & Write**, scoped to **only this bucket**. The app needs upload, download, list, and delete permissions. Use credentials intended for unattended operation; track any expiry you select.
+4. Save the **Access Key ID**, **Secret Access Key**, and **Account ID** privately. The secret may only be displayed once. Use the normal account endpoint, `https://ACCOUNT_ID.r2.cloudflarestorage.com`; jurisdiction-specific endpoints are not supported by this integration.
+
+### Configure and test locally
+
+Generate the encryption key using section 1 below (reuse your existing key if already generated). Keep a protected independent copy of it. Create a private file **outside the repository**, such as `$HOME/.config/timekeeper-backups/timekeeper-r2-backup.json`, with:
+
+```json
+{
+  "accountId": "YOUR_32_CHARACTER_ACCOUNT_ID",
+  "bucket": "timekeeper-backups",
+  "accessKeyId": "YOUR_R2_ACCESS_KEY_ID",
+  "secretAccessKey": "YOUR_R2_SECRET_ACCESS_KEY"
+}
+```
+
+Protect the file with `chmod 600` and never share it in chat or GitHub. On your local staging checkout, after `npm ci`:
+
+```sh
+export BACKUP_KEY_FILE="$HOME/.config/timekeeper-backups/timekeeper.backup.key"
+export R2_BACKUP_CREDENTIALS_FILE="$HOME/.config/timekeeper-backups/timekeeper-r2-backup.json"
+export BACKUP_ENABLED=true
+export BACKUP_OPERATOR_EMAILS="your-local-admin-email@example.com"
+npm start
+```
+
+Do not also configure Google credentials. For local testing use a **separate R2 bucket and bucket-scoped token**, so test retention cannot delete production recovery copies. Keep local and production credentials separate.
+
+In Settings, confirm a recent off-site timestamp and no error. R2 objects appear under `timekeeper/v1/`. Download an actual `.tkbackup` object from the R2 dashboard, then run `backup:verify` and `backup:restore` as described in section 3. Sign in to the restored local copy and check its data. Automated tests simulate R2; they do not prove your real account permissions or billing setup.
+
+### Configure the existing Render service after release approval
+
+Create these **Secret Files** in the existing Render service:
+
+- `timekeeper-backup.key`: the encryption key file contents.
+- `timekeeper-r2-backup.json`: the production R2 credentials JSON contents.
+
+Set environment variables:
+
+| Key | Value |
+| --- | --- |
+| `BACKUP_ENABLED` | `true` |
+| `BACKUP_KEY_FILE` | `/etc/secrets/timekeeper-backup.key` |
+| `R2_BACKUP_CREDENTIALS_FILE` | `/etc/secrets/timekeeper-r2-backup.json` |
+| `BACKUP_OPERATOR_EMAILS` | Your actual hosted admin login email |
+| `BACKUP_INTERVAL_HOURS` | `24` |
+| `BACKUP_RETAIN` | `7` |
+
+Keep `DATA_DIR=/var/data/timekeeper`. Remove any Google backup credential configuration. Alternatively R2 supports `R2_BACKUP_ACCOUNT_ID`, `R2_BACKUP_BUCKET`, `R2_BACKUP_ACCESS_KEY_ID`, and `R2_BACKUP_SECRET_ACCESS_KEY` instead of the JSON file.
+
+After the approved release and deployment, confirm both the Settings timestamp and an actual R2 object, then download that R2 object and perform a local restore check with the same encryption key. Until this is done, off-site recovery is unverified.
+
+Each upload contains only encrypted ciphertext. The app sends a content checksum and downloads the stored object to compare its SHA-256 and size before pruning. Defaults retain the latest seven managed archives locally and in R2. Only matching archive filenames under the dedicated `timekeeper/v1/` prefix are eligible for cleanup. A failed upload, verification, or incomplete listing prevents pruning. Read-back verification adds a download request per backup; storage/request costs depend on Cloudflare's current allowances. Check status regularly; there are no email failure alerts.
 
 ## 2. Connect Google Drive / Google One
 
@@ -85,7 +147,7 @@ npm run backup:create
 npm run backup:list
 ```
 
-`backup:create` creates a verified encrypted local archive without uploading or pruning; this is useful for an explicit pre-release copy. The scheduled service handles Google uploads and retention. Archives and keys must remain outside Git. Local download copies may also be stored in a Google Drive-synced folder on your Mac.
+`backup:create` creates a verified encrypted local archive without uploading or pruning; this is useful for an explicit pre-release copy. The scheduled service handles off-site uploads and retention. Archives and keys must remain outside Git. Local download copies may also be stored in a Google Drive-synced folder on your Mac.
 
 ## 4. Enable on the existing Render service after release approval
 

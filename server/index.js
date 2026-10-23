@@ -9,6 +9,7 @@ import { resolve } from 'node:path';
 import { openDatabase } from './db.js';
 import { accessStore } from './access.js';
 import { backupOptions, backupService } from './backups.js';
+import { r2BackupOptions, r2Destination } from './r2-backups.js';
 import { googleBackupOptions, googleDriveDestination } from './google-backups.js';
 
 const scrypt = promisify(scryptCallback);
@@ -226,7 +227,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const backupConfig = await backupOptions(process.env, options.dataDir);
   if (backupConfig) {
     const googleConfig = await googleBackupOptions();
-    if (googleConfig) backupConfig.destination = googleDriveDestination(googleConfig);
+    const r2Config = await r2BackupOptions();
+    if (googleConfig && r2Config) throw Error('Configure only one off-site backup destination: Google Drive or R2.');
+    if (r2Config) backupConfig.destination = r2Destination(r2Config);
+    else if (googleConfig) backupConfig.destination = googleDriveDestination(googleConfig);
   }
   const server = createApp({ ...options, backupConfig });
   server.listen(port, host, () => console.log(`Timekeeper listening on ${host}:${port}`));

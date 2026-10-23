@@ -7,8 +7,8 @@ async function loadBackupPanel() {
     panel.innerHTML = `<div class="panelhead"><h2>Server recovery backups</h2></div><div class="panelbody stack">
       <p>Encrypted recovery copies include accounts, access permissions, and business records.</p>
       <p>${status.enabled ? `Automatic backups every ${status.intervalHours} hours · keep ${status.retain} copies.` : 'Automatic recovery backups are not enabled. Your server operator needs to configure them.'}</p>
-      ${status.enabled ? `<small>Last local copy: ${when(status.lastLocalAt)}<br>Last Google Drive upload: ${when(status.lastOffsiteAt)}<br>Next attempt: ${when(status.nextRunAt)}</small>
-      <p class="note">${status.offsiteConfigured ? 'Google Drive uploads are configured. Confirm a recent upload before relying on off-site recovery.' : 'These copies are on the server disk only. Configure Google Drive or keep downloaded copies elsewhere to protect against losing that disk.'}</p>` : ''}
+      ${status.enabled ? `<small>Last local copy: ${when(status.lastLocalAt)}<br>Last off-site upload: ${when(status.lastOffsiteAt)}<br>Next attempt: ${when(status.nextRunAt)}</small>
+      <p class="note">${status.offsiteConfigured ? 'Off-site uploads are configured. Confirm a recent upload before relying on off-site recovery.' : 'These copies are on the server disk only. Configure Cloudflare R2, Google Drive, or keep downloaded copies elsewhere to protect against losing that disk.'}</p>` : ''}
       ${status.error ? `<p class="error" role="alert">${esc(status.error)}</p>` : ''}
       ${status.running ? '<small>A backup is currently running.</small>' : ''}
       ${status.canDownload ? '<button onclick="recoveryDownloadDialog()">Create and download encrypted recovery copy</button>' : ''}

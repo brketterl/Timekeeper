@@ -202,6 +202,7 @@ export function backupService(db, config, { destination = null, now = Date.now, 
       } catch (error) {
         state.lastErrorAt = new Date(now()).toISOString(); state.error = 'Backup did not complete. The server operator should check backup configuration, storage, and logs.';
         const explanations = { ENOSPC: 'Backup failed: the server disk is full.', EACCES: 'Backup failed: the backup directory is not writable.',
+          R2_BACKUP_FAILED: 'R2 backup failed. Check bucket credentials, permissions, connectivity, and storage status.',
           GOOGLE_AUTH_FAILED: 'Google backup authentication failed. The server operator must reconnect the Google account.',
           GOOGLE_UPLOAD_FAILED: 'Google backup upload failed. Check folder access, storage quota, and service connectivity.',
           GOOGLE_CHECKSUM_FAILED: 'Google backup upload did not pass its checksum check. Older Google copies were kept.',
