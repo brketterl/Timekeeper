@@ -1,5 +1,5 @@
 let revision = 0, pendingSaves = 0, saveFailure = '', saveQueue = Promise.resolve();
-let authMode = 'login';
+let authMode = 'login', signedInUser = null;
 let inviteToken = new URLSearchParams(location.hash.slice(1)).get('invite') || '';
 let invitationInfo = null, accountRole = 'admin', linkedEmployeeId = '', protectedEmployees = [], workspaces = [], workspaceId = '';
 
@@ -43,7 +43,8 @@ async function authenticate(form) {
 }
 
 async function loadWorkspace() {
-  const result = await api('/api/workspace');
+  const [result, identity] = await Promise.all([api('/api/workspace'), api('/api/auth/me')]);
+  signedInUser = identity.user;
   accountRole = result.role; linkedEmployeeId = result.employeeId; workspaceId = result.workspaceId;
   state = accountRole === 'admin' ? upgradeWorkspace(result.data) : result.data;
   protectedEmployees = (result.memberEmployeeIds || []).map(id => state.employees.find(e => e.id === id)).filter(Boolean);

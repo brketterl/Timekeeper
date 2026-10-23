@@ -26,6 +26,10 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('/');
   await register(page, 'Test admin', email('admin'));
+  await expect(page.locator('.workspace strong')).toHaveText('Test admin');
+  await expect(page.locator('.workspace small')).toHaveText('Admin');
+  await expect(page.locator('.workspace .avatar')).toHaveText('TA');
+  await expect(page.getByText('Your workspace is saved to your account.', { exact: true })).toHaveCount(0);
   await page.locator('nav button[title=Contracts]').click();
   await page.getByRole('button', { name: 'New contract', exact: true }).first().click();
   await page.locator('#contract-form [name=name]').fill('Shared project');
@@ -47,6 +51,8 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   worker.on('pageerror', error => errors.push(error.message));
   await worker.goto(await invite(page, workerEmail, 'employee'));
   await register(worker, 'Test worker', workerEmail);
+  await expect(worker.locator('.workspace strong')).toHaveText('Test worker');
+  await expect(worker.locator('.workspace small')).toHaveText('Employee');
   await expect(worker.locator('nav button')).toHaveText(['Timesheets', 'Contracts']);
   const employeeData = await (await worker.request.get('http://127.0.0.1:3100/api/workspace')).json();
   expect(employeeData.data.employees).toHaveLength(1);
