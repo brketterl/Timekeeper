@@ -141,3 +141,5 @@ Optional [backup alert emails through Resend](docs/backup-alerts.md) notify the 
 Registration is invitation-only by default. Keep `ALLOW_PUBLIC_REGISTRATION` unset or `false` on the hosted service. For a new isolated local test database, use `ALLOW_PUBLIC_REGISTRATION=true npm start` temporarily to create its first test owner, then restart normally. Existing accounts can sign in; invited accounts receive only the invitation’s assigned role.
 
 [Workspace activity history](docs/activity.md) records key committed changes for admins, with server-derived actors, workspace isolation, and append-only database entries. Migration 4 requires a verified pre-release production recovery archive.
+
+[Timesheet submission and approval emails](docs/timesheet-emails.md) use an optional durable Resend queue, enabled with `TIMESHEET_EMAIL_ENABLED=true`. Admins can view delivery status/retry failures in Settings. Migration 5 requires a verified pre-release production recovery backup.

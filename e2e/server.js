@@ -16,6 +16,7 @@ const inbox = createServer((req, res) => {
 inbox.listen(3101, '127.0.0.1');
 // Multiple browser workflows share loopback; production keeps the default 20-attempt limit.
 const server = createApp({ allowPublicRegistration: true, dataDir, secureCookies: false, allowedOrigin: null, authAttemptLimit: 200,
+  timesheetEmailConfig: { origin: 'http://127.0.0.1:3100', send: async email => { emails.push(email); return 'simulated-timesheet-email'; } },
   accountEmailConfig: { origin: 'http://127.0.0.1:3100', send: async email => { emails.push(email); return 'simulated-account-email'; } },
   backupConfig: { directory: join(dataDir, 'backups'), key: randomBytes(32), intervalMs: 86400_000, retain: 2,
     alerts: { send: async () => 'simulated-email-receipt' },

@@ -80,5 +80,16 @@ export function openDatabase(directory) {
       INSERT INTO schema_migrations VALUES(4);
       COMMIT;`);
   }
+  if (!db.prepare('SELECT 1 FROM schema_migrations WHERE version = 5').get()) {
+    db.exec(`BEGIN;
+      CREATE TABLE timesheet_notifications (id TEXT PRIMARY KEY,
+        event_id INTEGER NOT NULL REFERENCES audit_events(id), user_id TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL,
+        sent_at INTEGER, cancelled_at INTEGER, last_error TEXT,
+        UNIQUE(event_id,user_id));
+      CREATE INDEX timesheet_notification_due ON timesheet_notifications(sent_at,cancelled_at,next_attempt_at);
+      INSERT INTO schema_migrations VALUES(5);
+      COMMIT;`);
+  }
   return db;
 }

@@ -290,7 +290,7 @@ test('schema migration upgrades existing owners without losing workspace data or
     assert.equal(migrated.employees[0].email, account.email);
     assert.equal(doc.revision, 8);
     assert.equal(upgraded.prepare('SELECT token_hash FROM sessions').get().token_hash, hash);
-    assert.equal(upgraded.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, 4);
+    assert.equal(upgraded.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, 5);
   } finally { upgraded.close(); }
   const repeated = openDatabase(directory);
   assert.equal(repeated.prepare('SELECT revision FROM workspace_documents').get().revision, 8); repeated.close();

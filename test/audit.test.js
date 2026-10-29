@@ -8,11 +8,11 @@ import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../server/index.js';
 
 const password = 'audit integration password';
-async function fixture(t) {
+async function fixture(t, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'timekeeper-audit-'));
   let server, origin;
   const start = async () => {
-    server = createApp({ dataDir: directory, secureCookies: false, allowedOrigin: null, allowPublicRegistration: true, authAttemptLimit: 200 });
+    server = createApp({ dataDir: directory, secureCookies: false, allowedOrigin: null, allowPublicRegistration: true, authAttemptLimit: 200, ...options });
     server.listen(0, '127.0.0.1'); await once(server, 'listening'); origin = `http://127.0.0.1:${server.address().port}`;
   };
   await start();
@@ -116,4 +116,33 @@ test('history pagination has no duplicates or cross-workspace entries', async t 
   assert.equal((await f.request('/api/activity?before=-1', f.owner.cookie)).status, 400);
   assert.equal((await f.request('/api/activity?before=nan', f.owner.cookie)).status, 400);
   assert.deepEqual((await f.request('/api/activity?before=' + first.nextCursor, f.outsider.cookie)).body.events, []);
+});
+
+test('committed transitions send emails once; queue errors roll back changes and history', async t => {
+  const sent = [], f = await fixture(t, { timesheetEmailConfig: { origin: 'https://timekeeper.example.test', send: async email => sent.push(email) } });
+  const submit = async () => {
+    const doc = (await f.request('/api/workspace', f.worker.cookie)).body;
+    doc.data.sheets = [{ id: 'sheet', employeeId: 'worker', start: '2026-10-16', status: 'submitted', rows: [{ id: 'row', contractId: 'contract', status: 'submitted', hours: { '2026-10-16': 2 }, note: 'private time note' }] }];
+    return f.request('/api/employee/timesheets', f.worker.cookie, { sheets: doc.data.sheets, revision: doc.revision }, 'PUT');
+  };
+  const db = new DatabaseSync(join(f.directory, 'timekeeper.sqlite'));
+  db.exec("CREATE TRIGGER reject_notice BEFORE INSERT ON timesheet_notifications BEGIN SELECT RAISE(ABORT,'test queue unavailable'); END;");
+  assert.equal((await submit()).status, 500);
+  assert.equal((await f.request('/api/workspace', f.worker.cookie)).body.data.sheets.length, 0);
+  assert(!(await f.history()).events.some(e => e.type === 'timesheet.submitted')); assert.equal(sent.length, 0);
+  db.exec('DROP TRIGGER reject_notice'); db.close();
+  assert.equal((await submit()).status, 200); await new Promise(r => setImmediate(r));
+  assert.equal(sent.length, 1); assert.equal(sent[0].to, 'admin@example.test');
+  assert.equal((await submit()).status, 200); assert.equal(sent.length, 1);
+  const doc = (await f.request('/api/workspace', f.owner.cookie)).body;
+  doc.data.sheets[0].rows[0].status = 'approved'; doc.data.sheets[0].status = 'approved';
+  assert.equal((await f.save(doc)).status, 200); await new Promise(r => setImmediate(r));
+  assert.equal(sent.length, 2); assert.equal(sent[1].to, 'worker@example.test');
+  assert(!JSON.stringify(sent).includes('private time note')); assert(!JSON.stringify(sent).includes('10000'));
+  assert.equal((await f.request('/api/timesheet-notifications/status', f.worker.cookie)).status, 403);
+  assert.equal((await f.request('/api/timesheet-notifications/retry', f.worker.cookie, {})).status, 403);
+  assert.equal((await f.request('/api/timesheet-notifications/retry', f.outsider.cookie, {})).body.queued, 0);
+  assert.equal((await f.request('/api/timesheet-notifications/status', f.outsider.cookie)).body.accepted, 0);
+  assert.equal((await f.request('/api/timesheet-notifications/status', f.owner.cookie)).body.accepted, 2);
+  await f.restart(); assert.equal(sent.length, 2);
 });

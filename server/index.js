@@ -8,8 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { openDatabase } from './db.js';
 import { accessStore } from './access.js';
+import { timesheetNotifications } from './timesheet-notifications.js';
 import { accountEmail } from './account-email.js';
-import { emailOptions, resendSender, resendTransport, accountEmailOptions } from './email.js';
+import { emailOptions, resendSender, resendTransport, accountEmailOptions, timesheetEmailOptions } from './email.js';
 import { backupOptions, backupService } from './backups.js';
 import { r2BackupOptions, r2Destination } from './r2-backups.js';
 import { googleBackupOptions, googleDriveDestination } from './google-backups.js';
@@ -45,7 +46,7 @@ async function body(req) {
   catch { throw fail(400, 'Invalid JSON.'); }
 }
 
-export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), secureCookies = process.env.NODE_ENV === 'production', allowedOrigin = process.env.APP_ORIGIN, backupConfig = null, accountEmailConfig = null, authAttemptLimit = 20, allowPublicRegistration = false } = {}) {
+export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), secureCookies = process.env.NODE_ENV === 'production', allowedOrigin = process.env.APP_ORIGIN, backupConfig = null, accountEmailConfig = null, authAttemptLimit = 20, allowPublicRegistration = false, timesheetEmailConfig = null } = {}) {
   if (secureCookies && !allowedOrigin) throw Error('APP_ORIGIN is required in production.');
   if (allowedOrigin) {
     const origin = new URL(allowedOrigin);
@@ -53,14 +54,15 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
     if (secureCookies && origin.protocol !== 'https:') throw Error('Production requires an HTTPS APP_ORIGIN.');
     allowedOrigin = origin.origin;
   }
-  if (accountEmailConfig) {
-    const origin = new URL(accountEmailConfig.origin);
-    if (!['http:', 'https:'].includes(origin.protocol) || origin.origin !== accountEmailConfig.origin || (secureCookies && origin.protocol !== 'https:')) throw Error('Account email requires a trusted app origin.');
+  for (const config of [accountEmailConfig, timesheetEmailConfig].filter(Boolean)) {
+    const origin = new URL(config.origin);
+    if (!['http:', 'https:'].includes(origin.protocol) || origin.origin !== config.origin || (secureCookies && origin.protocol !== 'https:')) throw Error('Account email requires a trusted app origin.');
   }
   const db = openDatabase(dataDir);
   const accounts = accountEmail(db, accountEmailConfig, { hashPassword });
   const attempts = new Map();
-  const access = accessStore(db);
+  const notices = timesheetNotifications(db, timesheetEmailConfig);
+  const access = accessStore(db, { onAuditEvent: notices.enqueue, notificationStatus: notices.status, retryNotifications: notices.retryFailed });
   const recovery = backupService(db, backupConfig, { destination: backupConfig?.destination });
   function checkAuthLimit(req) {
     const now = Date.now();
@@ -91,7 +93,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         const html = await readFile(new URL('../public/index.html', import.meta.url));
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(html);
       }
-      if (req.method === 'GET' && ['/auth.js', '/access.js', '/backups.js', '/activity.js'].includes(path)) {
+      if (req.method === 'GET' && ['/auth.js', '/access.js', '/backups.js', '/activity.js', '/notifications.js'].includes(path)) {
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
         return res.end(await readFile(new URL(`../public${path}`, import.meta.url)));
       }
@@ -222,8 +224,9 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
       }
       const input = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await body(req) : {};
       if (path === '/api/activity' && req.method === 'GET') input.before = new URL(req.url, 'http://localhost').searchParams.get('before');
-      if (path === '/api/invitations' && req.method === 'POST') checkAuthLimit(req);
+      if (['/api/invitations', '/api/timesheet-notifications/retry'].includes(path) && req.method === 'POST') checkAuthLimit(req);
       let result = await access.route(path, req.method, session, input);
+      if ((req.method === 'PUT' && ['/api/workspace', '/api/employee/timesheets'].includes(path)) || (req.method === 'POST' && path === '/api/timesheet-notifications/retry')) void notices.checkDue();
       if (path === '/api/invitations' && req.method === 'POST') result = await accounts.invite(result);
       if (path === '/api/invitations/accept') {
         issueSession(res, session.user_id, result.workspaceId);
@@ -237,7 +240,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
     }
   });
   let resourcesClosing;
-  server.once('close', () => { resourcesClosing = Promise.all([recovery.stop(), accounts.stop()]).finally(() => db.close()); });
+  server.once('close', () => { resourcesClosing = Promise.all([recovery.stop(), accounts.stop(), notices.stop()]).finally(() => db.close()); });
   const closeHttp = server.close;
   server.close = function (callback) {
     return closeHttp.call(server, error => { Promise.resolve(resourcesClosing).then(() => callback?.(error), failure => callback?.(failure)); });
@@ -275,7 +278,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   }
   const accountConfig = await accountEmailOptions();
   const accountEmailConfig = accountConfig ? { send: resendTransport(accountConfig), origin: new URL(options.allowedOrigin || `http://127.0.0.1:${port}`).origin } : null;
-  const server = createApp({ ...options, backupConfig, accountEmailConfig });
+  const notificationConfig = await timesheetEmailOptions();
+  const timesheetEmailConfig = notificationConfig ? { send: resendTransport(notificationConfig), origin: new URL(options.allowedOrigin || `http://127.0.0.1:${port}`).origin } : null;
+  const server = createApp({ ...options, backupConfig, accountEmailConfig, timesheetEmailConfig });
   server.listen(port, host, () => console.log(`Timekeeper listening on ${host}:${port}`));
   const shutdown = () => {
     server.close(() => { process.exitCode = 0; });

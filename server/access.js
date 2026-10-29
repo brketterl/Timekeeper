@@ -10,8 +10,8 @@ const rowView = r => ({ id: r.id, contractId: r.contractId, status: r.status, ho
 const sheetView = s => ({ id: s.id, employeeId: s.employeeId, start: s.start, status: s.status, rows: s.rows.map(rowView) });
 const equal = isDeepStrictEqual;
 
-export function accessStore(db) {
-  const audit = auditStore(db);
+export function accessStore(db, { onAuditEvent, notificationStatus, retryNotifications } = {}) {
+  const audit = auditStore(db, { onEvent: onAuditEvent });
   const log = (session, type, id, summary, details) => audit.record(session.workspace_id, session.user_id, type, id, summary, details);
   const document = workspaceId => {
     const row = db.prepare('SELECT data, revision FROM workspace_documents WHERE workspace_id = ?').get(workspaceId);
@@ -178,6 +178,8 @@ export function accessStore(db) {
       return { ...result, action: hasHistory ? 'archived' : 'deleted' };
     });
     if (path === '/api/workspace' && method === 'PUT') return writeAdmin(session, input);
+    if (path === '/api/timesheet-notifications/retry' && method === 'POST') return retryNotifications(session.workspace_id);
+    if (path === '/api/timesheet-notifications/status' && method === 'GET') return notificationStatus(session.workspace_id);
     if (path === '/api/activity' && method === 'GET') return audit.list(session.workspace_id, input.before);
     if (path === '/api/members' && method === 'GET') return members(session.workspace_id);
     if (path === '/api/invitations' && method === 'GET') return db.prepare(`SELECT id, email, role, employee_id AS employeeId,

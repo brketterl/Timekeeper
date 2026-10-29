@@ -31,8 +31,9 @@ export function inspectDatabase(path) {
     const integrity = db.prepare('PRAGMA integrity_check').all();
     if (integrity.length !== 1 || integrity[0].integrity_check !== 'ok' || db.prepare('PRAGMA foreign_key_check').all().length) throw Error('Backup database integrity check failed.');
     const version = db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version;
-    if (![2, 3, 4].includes(version)) throw Error('This backup tool supports schema versions 2, 3, and 4 only.');
+    if (![2, 3, 4, 5].includes(version)) throw Error('This backup tool supports schema versions 2–5 only.');
     if (version >= 3) db.prepare('SELECT COUNT(*) FROM password_resets').get();
+    if (version >= 5) db.prepare('SELECT COUNT(*) FROM timesheet_notifications').get();
     if (version >= 4) db.prepare('SELECT COUNT(*) FROM audit_events').get();
     for (const table of ['users', 'memberships', 'workspaces', 'workspace_documents', 'sessions', 'invitations']) db.prepare(`SELECT COUNT(*) FROM ${table}`).get();
     for (const row of db.prepare('SELECT data FROM workspace_documents').iterate()) if (!validBackup(JSON.parse(row.data))) throw Error('Backup contains invalid workspace data.');
@@ -60,7 +61,7 @@ async function decryptArchive(archive, key, target) {
     if (length < 1 || length > 4096 || size <= prefix.length + length + 16) throw Error('Invalid recovery archive header.');
     raw = Buffer.alloc(length); await handle.read(raw, 0, length, prefix.length);
     header = JSON.parse(raw.toString()); offset = prefix.length + length;
-    if (header.version !== 1 || ![2, 3, 4].includes(header.schemaVersion) || !Number.isSafeInteger(header.bytes) || header.bytes <= 0 || !/^[a-f0-9]{64}$/.test(header.sha256) || typeof header.iv !== 'string' || Buffer.from(header.iv, 'base64').length !== 12 || !Number.isFinite(Date.parse(header.createdAt))) throw Error('Invalid recovery archive metadata.');
+    if (header.version !== 1 || ![2, 3, 4, 5].includes(header.schemaVersion) || !Number.isSafeInteger(header.bytes) || header.bytes <= 0 || !/^[a-f0-9]{64}$/.test(header.sha256) || typeof header.iv !== 'string' || Buffer.from(header.iv, 'base64').length !== 12 || !Number.isFinite(Date.parse(header.createdAt))) throw Error('Invalid recovery archive metadata.');
     if (size - offset - 16 !== header.bytes) throw Error('Recovery archive is truncated or has an invalid length.');
     const tag = Buffer.alloc(16); await handle.read(tag, 0, 16, size - 16);
     const cipher = createDecipheriv('aes-256-gcm', key, Buffer.from(header.iv, 'base64'));
@@ -133,6 +134,10 @@ export async function restoreArchive(archive, key, targetDirectory) {
     if (metadata.schemaVersion >= 3) {
       const resetDb = new DatabaseSync(path);
       try { resetDb.exec('DELETE FROM password_resets; PRAGMA wal_checkpoint(TRUNCATE);'); } finally { resetDb.close(); }
+    }
+    if (metadata.schemaVersion >= 5) {
+      const notificationDb = new DatabaseSync(path);
+      try { notificationDb.exec('DELETE FROM timesheet_notifications; PRAGMA wal_checkpoint(TRUNCATE);'); } finally { notificationDb.close(); }
     }
     inspectDatabase(path); completed = true;
     return { ...metadata, directory: target };

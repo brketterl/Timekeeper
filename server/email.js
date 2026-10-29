@@ -44,3 +44,9 @@ export async function accountEmailOptions(env = process.env) {
   if (env.AUTH_EMAIL_ENABLED !== 'true') throw Error('AUTH_EMAIL_ENABLED must be true or false.');
   return resendOptions(env);
 }
+
+export async function timesheetEmailOptions(env = process.env) {
+  if (!env.TIMESHEET_EMAIL_ENABLED || env.TIMESHEET_EMAIL_ENABLED === 'false') return null;
+  if (env.TIMESHEET_EMAIL_ENABLED !== 'true') throw Error('TIMESHEET_EMAIL_ENABLED must be true or false.');
+  return resendOptions(env);
+}

@@ -1,13 +1,14 @@
 import { isDeepStrictEqual as equal } from 'node:util';
 
 // Only server-built summaries/details are accepted here, never request-supplied audit records.
-export function auditStore(db) {
+export function auditStore(db, { onEvent = () => {} } = {}) {
   function record(workspaceId, userId, type, entityId, summary, details = {}) {
     const actor = db.prepare(`SELECT u.name, m.role FROM users u LEFT JOIN memberships m ON m.user_id=u.id AND m.workspace_id=? WHERE u.id=?`).get(workspaceId, userId);
     if (!actor?.role) throw Error('An audit actor must belong to the workspace.');
     const safeDetails = Object.fromEntries(Object.entries(details).map(([key, value]) => [key, typeof value === 'string' ? value.slice(0, 200) : value]));
-    db.prepare(`INSERT INTO audit_events(workspace_id,actor_id,actor_name,actor_role,event_type,entity_id,summary,details,created_at)
+    const inserted = db.prepare(`INSERT INTO audit_events(workspace_id,actor_id,actor_name,actor_role,event_type,entity_id,summary,details,created_at)
       VALUES(?,?,?,?,?,?,?,?,?)`).run(workspaceId, userId, actor.name, actor.role, type, entityId, summary.slice(0, 500), JSON.stringify(safeDetails), Date.now());
+    onEvent({ id: Number(inserted.lastInsertRowid), workspaceId, actorId: userId, type, entityId, details: safeDetails });
   }
   function changes(session, before, after) {
     const log = (type, id, text, details) => record(session.workspace_id, session.user_id, type, id, text, details);

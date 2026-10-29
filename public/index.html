@@ -14,6 +14,7 @@
 <script src="/access.js"></script>
 <script src="/backups.js"></script>
 <script src="/activity.js"></script>
+<script src="/notifications.js"></script>
 <script>
 'use strict';
 const KEY='interval.workspace.v1';
@@ -96,7 +97,7 @@ function render(){
  const waiting=state.sheets.filter(s=>s.rows.some(r=>r.status==='submitted')).length;
  document.getElementById('app').innerHTML=`<aside class="sidebar"><div class="brand"><img class="brand-logo" src="${BRAND_LOGO}" alt="Company logo" width="124" height="124"><span class="brand-caption">Time &amp; billing</span></div><div class="eyebrow">Workspace</div><nav class="nav" aria-label="Main navigation">${nav.filter(n=>isOwner()||['timesheets','contracts'].includes(n[0])).map(n=>`<button title="${n[2]}" class="${view===n[0]?'active':''}" onclick="go('${n[0]}')">${icon(n[1])}<span>${n[2]}</span>${n[0]==='timesheets'&&waiting&&isOwner()?`<span class="count">${waiting}</span>`:''}</button>`).join('')}</nav><div class="sidebar-bottom"><div class="note" style="padding:13px;font-size:11px"><span class="eyebrow" style="display:block;padding:0;margin:0 0 6px;color:#587594">A little less admin.</span>More time for the work that matters.</div><div class="workspace row"><div class="avatar">${esc(initials(signedInUser?.name || signedInUser?.email || ''))}</div><div><strong>${esc(signedInUser?.name || signedInUser?.email || '')}</strong><br><small>${accountRole==='admin'?'Admin':'Employee'}</small></div></div></div></aside><main><header class="topbar"><div class="crumb">Workspace<span>/</span>${nav.find(n=>n[0]===view)[2]}</div><div class="row"><small><span class="live-dot"></span><span id="save-label">${saveLabel()}</span></small><select aria-label="Workspace" onchange="switchWorkspace(this.value)">${workspaces.map(w=>`<option value="${esc(w.id)}" ${w.id===workspaceId?'selected':''}>${esc(w.name)} · ${esc(w.role)}</option>`).join('')}</select><button class="small" onclick="openAccount()">My account</button><button class="small" onclick="logout()">Sign out</button></div></header><div class="content">${saveFailure?`<div class="notice" role="alert"><span>${esc(saveFailure)}</span></div>`:''}${({overview:overview,timesheets:timesheets,contracts:isOwner()?contractsView:employeeContractsView,team:teamView,invoices:invoicesView,settings:settingsView,activity:activityView}[view])()}</div></main>`;
  if(isOwner()&&view==='activity')loadActivity();
- if(isOwner()&&view==='settings')loadBackupPanel();
+ if(isOwner()&&view==='settings'){loadBackupPanel();const panel=document.createElement('section');panel.id='timesheet-notifications';panel.className='panel';panel.style.marginTop='24px';document.querySelector('.content').append(panel);loadTimesheetNotifications()}
  if(isOwner()&&view==='team'){const panel=document.createElement('div');panel.id='access-panel';document.querySelector('.content').append(panel);loadAccessPanel()}
 }
 function overview(){

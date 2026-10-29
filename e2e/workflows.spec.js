@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 
 const password = 'automated test password 123';
 const email = prefix => `${prefix}-${randomUUID()}@example.test`;
+const inboxEmails = async (page, address) => (await page.request.get('http://127.0.0.1:3101/?to=' + encodeURIComponent(address))).json();
 const saved = page => expect(page.locator('#save-label')).toHaveText('Saved to server');
 
 async function register(page, name, address) {
@@ -28,7 +29,8 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('/');
-  await register(page, 'Test admin', email('admin'));
+  const adminEmail = email('admin');
+  await register(page, 'Test admin', adminEmail);
   await expect(page.locator('.workspace strong')).toHaveText('Test admin');
   await expect(page.locator('.workspace small')).toHaveText('Admin');
   await expect(page.locator('.workspace .avatar')).toHaveText('TA');
@@ -70,11 +72,13 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await saved(worker);
   await worker.getByRole('button', { name: 'Submit timesheet' }).click();
   await saved(worker);
+  await expect.poll(async () => (await inboxEmails(page, adminEmail)).filter(email => email.subject.includes('submitted for review')).length).toBe(1);
 
   await page.reload();
   await page.getByRole('button', { name: 'Review', exact: true }).click();
   await page.getByRole('button', { name: 'Approve submitted hours', exact: true }).click();
   await saved(page);
+  await expect.poll(async () => (await inboxEmails(worker, workerEmail)).filter(email => email.subject.includes('hours were approved')).length).toBe(1);
   await worker.reload();
   await expect(worker.locator('input[type=number]').first()).toBeDisabled();
 
@@ -132,6 +136,7 @@ test('configured backup operator downloads an encrypted recovery archive from Se
   await register(page, 'Backup operator', `backup-operator-${info.retry}@example.test`);
   await page.locator('nav button[title=Settings]').click();
   await expect(page.locator('#recovery-backups')).toContainText('These copies are on the server disk only.');
+  await expect(page.locator('#timesheet-notifications')).toContainText('Submission and approval emails are enabled.');
   await expect(page.locator('#recovery-backups')).toContainText('Email alerts enabled');
   await page.getByRole('button', { name: 'Send test backup alert', exact: true }).click();
   await page.getByLabel('Current password', { exact: true }).fill(password);
