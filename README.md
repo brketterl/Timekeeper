@@ -138,3 +138,5 @@ Optional [backup alert emails through Resend](docs/backup-alerts.md) notify the 
 [Password reset and invitation email setup](docs/account-email.md) reuses Resend and the configured app domain. Account email is opt-in via `AUTH_EMAIL_ENABLED`; migration 3 requires a verified pre-release recovery backup.
 
 Registration is invitation-only by default. Keep `ALLOW_PUBLIC_REGISTRATION` unset or `false` on the hosted service. For a new isolated local test database, use `ALLOW_PUBLIC_REGISTRATION=true npm start` temporarily to create its first test owner, then restart normally. Existing accounts can sign in; invited accounts receive only the invitation’s assigned role.
+
+[Workspace activity history](docs/activity.md) records key committed changes for admins, with server-derived actors, workspace isolation, and append-only database entries. Migration 4 requires a verified pre-release production recovery archive.

@@ -1,5 +1,6 @@
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { auditStore } from './audit.js';
 import { validBackup } from './validation.js';
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -10,6 +11,8 @@ const sheetView = s => ({ id: s.id, employeeId: s.employeeId, start: s.start, st
 const equal = isDeepStrictEqual;
 
 export function accessStore(db) {
+  const audit = auditStore(db);
+  const log = (session, type, id, summary, details) => audit.record(session.workspace_id, session.user_id, type, id, summary, details);
   const document = workspaceId => {
     const row = db.prepare('SELECT data, revision FROM workspace_documents WHERE workspace_id = ?').get(workspaceId);
     return { data: JSON.parse(row.data), revision: row.revision };
@@ -53,6 +56,7 @@ export function accessStore(db) {
     db.prepare('INSERT INTO memberships VALUES (?, ?, ?, ?)').run(user.id, invite.workspace_id, invite.role, employee.id);
     write(invite.workspace_id, doc.data, doc.revision);
     db.prepare('UPDATE invitations SET accepted_at = ? WHERE id = ?').run(Date.now(), invite.id);
+    audit.record(invite.workspace_id, user.id, 'invitation.accepted', invite.id, 'Accepted workspace invitation', { role: invite.role });
     return invite.workspace_id;
   }
   function read(session) {
@@ -77,7 +81,10 @@ export function accessStore(db) {
         const employee = input.data.employees.find(e => e.id === member.employeeId);
         if (!employee?.active || employee.email.toLowerCase() !== member.email.toLowerCase()) throw fail(409, 'Keep linked account employee records active with their account email. Remove workspace access first to archive an employee.');
       }
-      return write(session.workspace_id, input.data, input.revision);
+      const before = document(session.workspace_id).data;
+      const result = write(session.workspace_id, input.data, input.revision);
+      audit.changes(session, before, input.data);
+      return result;
     });
   }
   function writeEmployee(session, input) {
@@ -110,8 +117,11 @@ export function accessStore(db) {
         });
         return { ...s, rows };
       });
+      const before = structuredClone(doc.data);
       doc.data.sheets = [...doc.data.sheets.filter(s => s.employeeId !== employee.id), ...incoming];
-      return write(session.workspace_id, doc.data, input.revision);
+      const result = write(session.workspace_id, doc.data, input.revision);
+      audit.changes(session, before, doc.data);
+      return result;
     });
   }
   function changeEmail(session, email, verifiedHash, sessionHash) {
@@ -128,6 +138,7 @@ export function accessStore(db) {
         if (!employee) throw fail(409, 'An employee link needs repair before the email can be changed.');
         employee.email = email;
         write(link.workspace_id, doc.data, doc.revision);
+        for (const prior of db.prepare('SELECT id FROM invitations WHERE workspace_id=? AND employee_id=? AND accepted_at IS NULL AND revoked_at IS NULL').all(link.workspace_id, employee.id)) audit.record(link.workspace_id, session.user_id, 'invitation.revoked', prior.id, 'Revoked invitation after account email changed', { reason: 'email_changed' });
         db.prepare('UPDATE invitations SET revoked_at = ? WHERE workspace_id = ? AND employee_id = ? AND accepted_at IS NULL AND revoked_at IS NULL').run(Date.now(), link.workspace_id, employee.id);
       }
       db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email, session.user_id);
@@ -159,12 +170,15 @@ export function accessStore(db) {
       if (hasHistory) employee.active = false;
       else doc.data.employees = doc.data.employees.filter(e => e.id !== employeeId);
       const result = write(session.workspace_id, doc.data, input.revision);
+      for (const prior of db.prepare('SELECT id FROM invitations WHERE workspace_id=? AND accepted_at IS NULL AND revoked_at IS NULL AND (employee_id=? OR (employee_id IS NULL AND email=?))').all(session.workspace_id, employeeId, employee.email)) log(session, 'invitation.revoked', prior.id, 'Revoked invitation when removing employee', { reason: 'employee_removed' });
       db.prepare(`UPDATE invitations SET revoked_at = ? WHERE workspace_id = ? AND accepted_at IS NULL
         AND revoked_at IS NULL AND (employee_id = ? OR (employee_id IS NULL AND email = ?))`)
         .run(Date.now(), session.workspace_id, employeeId, employee.email);
+      log(session, hasHistory ? 'employee.archived' : 'employee.removed', employeeId, `${hasHistory ? 'Archived' : 'Removed'} employee: ${employee.name}`);
       return { ...result, action: hasHistory ? 'archived' : 'deleted' };
     });
     if (path === '/api/workspace' && method === 'PUT') return writeAdmin(session, input);
+    if (path === '/api/activity' && method === 'GET') return audit.list(session.workspace_id, input.before);
     if (path === '/api/members' && method === 'GET') return members(session.workspace_id);
     if (path === '/api/invitations' && method === 'GET') return db.prepare(`SELECT id, email, role, employee_id AS employeeId,
       expires_at AS expiresAt, accepted_at AS acceptedAt, revoked_at AS revokedAt FROM invitations WHERE workspace_id = ? ORDER BY expires_at DESC`).all(session.workspace_id);
@@ -182,16 +196,19 @@ export function accessStore(db) {
         if (members(session.workspace_id).some(m => m.employeeId === employeeId)) throw fail(409, 'This employee already has an account.');
       }
       const token = randomBytes(32).toString('hex'), id = randomUUID(), expiresAt = Date.now() + 7 * 86400_000;
+      for (const prior of db.prepare('SELECT id FROM invitations WHERE workspace_id=? AND email=? AND accepted_at IS NULL AND revoked_at IS NULL').all(session.workspace_id, email)) log(session, 'invitation.revoked', prior.id, 'Replaced workspace invitation', { reason: 'replacement' });
       db.prepare('UPDATE invitations SET revoked_at = ? WHERE workspace_id = ? AND email = ? AND accepted_at IS NULL AND revoked_at IS NULL').run(Date.now(), session.workspace_id, email);
       db.prepare('INSERT INTO invitations VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)').run(id, session.workspace_id, email, input.role, employeeId, digest(token), session.user_id, expiresAt);
+      log(session, 'invitation.created', id, `Invited ${email} as ${input.role}`, { email, role: input.role });
       return { id, token, expiresAt };
     });
     const inviteMatch = /^\/api\/invitations\/([a-zA-Z0-9-]+)$/.exec(path);
-    if (inviteMatch && method === 'DELETE') {
+    if (inviteMatch && method === 'DELETE') return transaction(() => {
       const result = db.prepare('UPDATE invitations SET revoked_at = ? WHERE id = ? AND workspace_id = ? AND accepted_at IS NULL AND revoked_at IS NULL').run(Date.now(), inviteMatch[1], session.workspace_id);
       if (!result.changes) throw fail(404, 'Pending invitation not found.');
+      log(session, 'invitation.revoked', inviteMatch[1], 'Revoked workspace invitation');
       return { ok: true };
-    }
+    });
     const memberMatch = /^\/api\/members\/([a-zA-Z0-9-]+)$/.exec(path);
     if (memberMatch && ['PATCH', 'DELETE'].includes(method)) return transaction(() => {
       const member = members(session.workspace_id).find(m => m.userId === memberMatch[1]);
@@ -199,9 +216,13 @@ export function accessStore(db) {
       if (method === 'PATCH' && !roles.includes(input.role)) throw fail(400, 'Choose admin or employee.');
       if (member.role === 'admin' && (method === 'DELETE' || input.role !== 'admin') && members(session.workspace_id).filter(m => m.role === 'admin').length <= 1) throw fail(409, 'A workspace must retain at least one admin.');
       if (method === 'DELETE') {
+        log(session, 'member.removed', member.userId, `Removed workspace access for ${member.name}`, { previousRole: member.role });
         db.prepare('DELETE FROM memberships WHERE workspace_id = ? AND user_id = ?').run(session.workspace_id, member.userId);
         db.prepare('DELETE FROM sessions WHERE workspace_id = ? AND user_id = ?').run(session.workspace_id, member.userId);
-      } else db.prepare('UPDATE memberships SET role = ? WHERE workspace_id = ? AND user_id = ?').run(input.role, session.workspace_id, member.userId);
+      } else {
+        if (member.role !== input.role) log(session, 'member.role_changed', member.userId, `Changed ${member.name} from ${member.role} to ${input.role}`, { from: member.role, to: input.role });
+        db.prepare('UPDATE memberships SET role = ? WHERE workspace_id = ? AND user_id = ?').run(input.role, session.workspace_id, member.userId);
+      }
       return { ok: true };
     });
     throw fail(404, 'Not found.');

@@ -67,5 +67,18 @@ export function openDatabase(directory) {
       INSERT INTO schema_migrations VALUES (3);
       COMMIT;`);
   }
+  if (!db.prepare('SELECT 1 FROM schema_migrations WHERE version = 4').get()) {
+    db.exec(`BEGIN;
+      CREATE TABLE audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id), actor_id TEXT NOT NULL,
+        actor_name TEXT NOT NULL, actor_role TEXT NOT NULL CHECK(actor_role IN ('admin','employee')),
+        event_type TEXT NOT NULL, entity_id TEXT NOT NULL, summary TEXT NOT NULL,
+        details TEXT NOT NULL CHECK(json_valid(details)), created_at INTEGER NOT NULL);
+      CREATE INDEX audit_workspace ON audit_events(workspace_id,id DESC);
+      CREATE TRIGGER audit_no_update BEFORE UPDATE ON audit_events BEGIN SELECT RAISE(ABORT,'Audit events cannot be updated'); END;
+      CREATE TRIGGER audit_no_delete BEFORE DELETE ON audit_events BEGIN SELECT RAISE(ABORT,'Audit events cannot be deleted'); END;
+      INSERT INTO schema_migrations VALUES(4);
+      COMMIT;`);
+  }
   return db;
 }

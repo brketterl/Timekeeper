@@ -91,7 +91,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         const html = await readFile(new URL('../public/index.html', import.meta.url));
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(html);
       }
-      if (req.method === 'GET' && ['/auth.js', '/access.js', '/backups.js'].includes(path)) {
+      if (req.method === 'GET' && ['/auth.js', '/access.js', '/backups.js', '/activity.js'].includes(path)) {
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
         return res.end(await readFile(new URL(`../public${path}`, import.meta.url)));
       }
@@ -221,6 +221,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         return send(200, { ok: true });
       }
       const input = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await body(req) : {};
+      if (path === '/api/activity' && req.method === 'GET') input.before = new URL(req.url, 'http://localhost').searchParams.get('before');
       if (path === '/api/invitations' && req.method === 'POST') checkAuthLimit(req);
       let result = await access.route(path, req.method, session, input);
       if (path === '/api/invitations' && req.method === 'POST') result = await accounts.invite(result);

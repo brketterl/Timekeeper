@@ -48,7 +48,7 @@ test('online encrypted snapshots recover committed WAL data, logins, memberships
   assert((await stat(join(f.dataDir, 'timekeeper.sqlite-wal'))).size > 0);
   const archive = await createArchive(f.db, f.directory, f.key);
   assert(!(await readFile(archive.path)).includes(Buffer.from('admin@example.test')));
-  const metadata = await verifyArchive(archive.path, f.key); assert.equal(metadata.schemaVersion, 3);
+  const metadata = await verifyArchive(archive.path, f.key); assert.equal(metadata.schemaVersion, 4);
   const restoredPath = join(f.root, 'restored'); await restoreArchive(archive.path, f.key, restoredPath);
   const recovered = new DatabaseSync(join(restoredPath, 'timekeeper.sqlite'));
   try {
@@ -72,20 +72,26 @@ test('online encrypted snapshots recover committed WAL data, logins, memberships
   } finally { await new Promise(r => server.close(r)); }
 });
 
-test('schema-3 restore clears reset links and schema-2 archives still upgrade safely', async t => {
+test('schema-4 restore retains audit history and clears reset links; schemas 2 and 3 still restore', async t => {
   const f = await fixture(t);
+  f.db.prepare(`INSERT INTO audit_events(workspace_id,actor_id,actor_name,actor_role,event_type,entity_id,summary,details,created_at) VALUES(?,?,?,?,?,?,?,?,?)`).run('one','admin','Historic admin','admin','workspace.updated','one','Updated settings','{}',Date.now());
   f.db.prepare('INSERT INTO password_resets VALUES(?,?,?,?,?,?)').run('hashed-token', 'admin', 'admin@example.test', 'credential-fingerprint', Date.now(), Date.now() + 1800_000);
   const archive = await createArchive(f.db, f.directory, f.key), target = join(f.root, 'restored-v3');
   await restoreArchive(archive.path, f.key, target);
   const restored = new DatabaseSync(join(target, 'timekeeper.sqlite'));
-  assert.equal(restored.prepare('SELECT COUNT(*) AS n FROM password_resets').get().n, 0); restored.close();
+  assert.equal(restored.prepare('SELECT COUNT(*) AS n FROM password_resets').get().n, 0);
+  assert.equal(restored.prepare('SELECT actor_name FROM audit_events').get().actor_name, 'Historic admin'); restored.close();
+  f.db.exec('DROP TABLE audit_events; DELETE FROM schema_migrations WHERE version=4;');
+  const v3Archive = await createArchive(f.db, f.directory, f.key);
+  assert.equal((await verifyArchive(v3Archive.path, f.key)).schemaVersion, 3);
+  await restoreArchive(v3Archive.path, f.key, join(f.root, 'restored-schema-3'));
   // A real schema-2 snapshot models archives produced before the migration.
-  f.db.exec('DROP TABLE password_resets; DELETE FROM schema_migrations WHERE version=3;');
+  f.db.exec('DROP TABLE IF EXISTS audit_events; DROP TABLE password_resets; DELETE FROM schema_migrations WHERE version>=3;');
   const oldArchive = await createArchive(f.db, f.directory, f.key);
   assert.equal((await verifyArchive(oldArchive.path, f.key)).schemaVersion, 2);
   const oldTarget = join(f.root, 'restored-v2'); await restoreArchive(oldArchive.path, f.key, oldTarget);
   const upgraded = openDatabase(oldTarget);
-  assert.equal(upgraded.prepare('SELECT MAX(version) AS n FROM schema_migrations').get().n, 3);
+  assert.equal(upgraded.prepare('SELECT MAX(version) AS n FROM schema_migrations').get().n, 4);
   assert.equal(upgraded.prepare('SELECT COUNT(*) AS n FROM users').get().n, 3); upgraded.close();
 });
 

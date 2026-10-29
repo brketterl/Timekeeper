@@ -56,6 +56,7 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await register(worker, 'Test worker', workerEmail);
   await expect(worker.locator('.workspace strong')).toHaveText('Test worker');
   await expect(worker.locator('.workspace small')).toHaveText('Employee');
+  await expect(worker.locator('nav button[title=Activity]')).toHaveCount(0);
   await expect(worker.locator('nav button')).toHaveText(['Timesheets', 'Contracts']);
   const employeeData = await (await worker.request.get('http://127.0.0.1:3100/api/workspace')).json();
   expect(employeeData.data.employees).toHaveLength(1);
@@ -83,7 +84,7 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   partner.on('pageerror', error => errors.push(error.message));
   await partner.goto(await invite(page, partnerEmail, 'admin'));
   await register(partner, 'Test partner', partnerEmail);
-  await expect(partner.locator('nav button')).toHaveCount(6);
+  await expect(partner.locator('nav button[title=Activity]')).toBeVisible();
   await partner.locator('nav button[title=Settings]').click();
   await partner.locator('input[name=business]').fill('Shared test business');
   await partner.getByRole('button', { name: 'Save settings', exact: true }).click();
@@ -157,6 +158,9 @@ test('emailed invitation and password reset work without losing workspace access
   await page.goto('/'); await register(page, 'Email admin', adminEmail);
   const invitationLink = await invite(page, invitedEmail, 'employee');
   await expect(page.locator('#invite-result')).toContainText('Invitation email accepted');
+  await page.locator('nav button[title=Activity]').click();
+  await expect(page.locator('#activity-list')).toContainText('Invited ' + invitedEmail);
+  await expect(page.locator('#activity-list')).toContainText('Email admin');
   const invitationEmails = await (await page.request.get('http://127.0.0.1:3101/?to=' + encodeURIComponent(invitedEmail))).json();
   expect(invitationEmails).toHaveLength(1); expect(invitationEmails[0].text).toContain(invitationLink);
   await page.goto(invitationLink);
