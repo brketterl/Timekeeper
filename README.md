@@ -126,7 +126,8 @@ The browser tests use a new temporary SQLite database, not the developer's or pr
 ## Next backend work
 
 - Email verification and administrative account recovery beyond emailed password resets.
-- Resource-level business APIs, normalized financial tables, and an audit history.
+- Searchable Activity history with actor, action-type, and date-range filters; see [future Activity enhancements](docs/activity.md#future-enhancement-searchable-activity).
+- Resource-level business APIs and normalized financial tables.
 - Independent monitoring for a completely stopped service. Google/R2 connectivity and off-site restore checks require your own configured account.
 
 Invoice sending currently records a date; it does not send email. Payments are recorded manually and are not processed by the app.

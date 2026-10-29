@@ -45,3 +45,7 @@ Before production approval, create a fresh full production recovery archive, dow
 After local review and explicit approval, release main and deploy on the existing Render service. No new environment variables, credentials, email service, or paid instance are required. Confirm the Activity page, admin/employee access boundaries, and successful encrypted backups after deployment.
 
 Rollback: reverting code does not remove migration 4 or its triggers/history. Previous schema-3-only backup tools cannot read schema-4 recovery archives; retain the updated tools or fix forward. Restoring the pre-release database requires a maintenance window and loses changes after its capture; restore into a new directory instead of overwriting a live database.
+
+## Future enhancement: searchable activity
+
+Requested after MVP review: make Activity history searchable. Plan server-side keyword search and filters for actor, action type, and date range across the full history, not just the loaded page. Preserve admin-only access, workspace isolation, stable pagination, and append-only entries. This is recorded for future work and is not included in the current MVP.
