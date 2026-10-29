@@ -158,7 +158,9 @@ export function backupService(db, config, { destination = null, now = Date.now, 
   const alerts = config?.alerts ? backupAlerts({ ...config.alerts, directory: config.directory, now, logger }) : null;
   let state = { lastSuccessAt: null, lastLocalAt: null, lastOffsiteAt: null, lastErrorAt: null, error: null, name: null, destinationId: destination?.identity || null };
   const intervalMs = config?.intervalMs || 24 * 3600_000;
-  const dueAt = () => state.error && state.lastErrorAt ? Date.parse(state.lastErrorAt) + 15 * 60_000 : state.lastSuccessAt ? Date.parse(state.lastSuccessAt) + intervalMs : now();
+  // Keep the initial deadline fixed: comparing two advancing 'now' calls can skip the first run.
+  const initialDueAt = now();
+  const dueAt = () => state.error && state.lastErrorAt ? Date.parse(state.lastErrorAt) + 15 * 60_000 : state.lastSuccessAt ? Date.parse(state.lastSuccessAt) + intervalMs : initialDueAt;
   const status = () => ({ enabled: Boolean(config), intervalHours: intervalMs / 3600_000, retain: config?.retain || 0, running: Boolean(running),
     offsiteConfigured: Boolean(destination), alerts: alerts?.status() || { enabled: false }, ...Object.fromEntries(['lastSuccessAt', 'lastLocalAt', 'lastOffsiteAt', 'lastErrorAt', 'error'].map(k => [k, state[k]])),
     nextRunAt: config ? new Date(dueAt()).toISOString() : null });

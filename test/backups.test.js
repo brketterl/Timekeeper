@@ -127,6 +127,18 @@ test('retention only removes managed archives after a verified replacement', asy
   await assert.rejects(pruneArchives(f.directory, 0, archives[2].name));
 });
 
+test('first scheduled backup remains due while the clock advances between checks', async t => {
+  const f = await fixture(t); let time = Date.now();
+  const service = backupService(f.db, { directory: f.directory, key: f.key, retain: 2, intervalMs: 86400_000, operators: [] },
+    { autoStart: false, now: () => time++ });
+  try {
+    await service.ready; await service.checkDue();
+    assert(service.status().lastSuccessAt, 'The first backup must run without waiting for a later scheduler tick.');
+    const names = await listArchives(f.directory); assert.equal(names.length, 1);
+    await verifyArchive(join(f.directory, names[0]), f.key);
+  } finally { await service.stop(); }
+});
+
 test('daily schedule, retries, restart checkpoint, and destination changes are tracked', async t => {
   const f = await fixture(t);
   let time = Date.now(), uploads = 0, failUpload = false; const uploadedNames = [];
