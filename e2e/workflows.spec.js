@@ -148,3 +148,38 @@ test('configured backup operator downloads an encrypted recovery archive from Se
   expect(contents.includes(Buffer.from('backup-operator'))).toBe(false);
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
+
+test('emailed invitation and password reset work without losing workspace access', async ({ page, browser }) => {
+  const adminEmail = email('mail-admin'), invitedEmail = email('mail-worker');
+  await page.goto('/'); await register(page, 'Email admin', adminEmail);
+  const invitationLink = await invite(page, invitedEmail, 'employee');
+  await expect(page.locator('#invite-result')).toContainText('Invitation email accepted');
+  const invitationEmails = await (await page.request.get('http://127.0.0.1:3101/?to=' + encodeURIComponent(invitedEmail))).json();
+  expect(invitationEmails).toHaveLength(1); expect(invitationEmails[0].text).toContain(invitationLink);
+  const context = await browser.newContext(), worker = await context.newPage();
+  await worker.goto(invitationEmails[0].text.match(/http:\/\/127\.0\.0\.1:3100\/#invite=[a-f0-9]+/)[0]);
+  await register(worker, 'Email worker', invitedEmail);
+  await expect(worker.locator('.workspace small')).toHaveText('Employee');
+  await worker.getByRole('button', { name: 'Sign out', exact: true }).click();
+  await worker.getByRole('button', { name: 'Forgot password?', exact: true }).click();
+  await worker.getByLabel('Email', { exact: true }).fill(invitedEmail);
+  await worker.getByRole('button', { name: 'Send reset link', exact: true }).click();
+  await expect(worker.locator('form [role=status]')).toContainText('If an account exists');
+  const resetEmails = await (await worker.request.get('http://127.0.0.1:3101/?to=' + encodeURIComponent(invitedEmail))).json();
+  const resetLink = resetEmails.find(message => message.subject.includes('Reset')).text.match(/http:\/\/127\.0\.0\.1:3100\/#reset=[a-f0-9]+/)[0];
+  await worker.goto(resetLink);
+  await expect(worker).toHaveURL('http://127.0.0.1:3100/');
+  const newPassword = 'updated browser password 123';
+  await worker.getByLabel('New password', { exact: true }).fill(newPassword);
+  await worker.getByLabel('Confirm password', { exact: true }).fill('mismatched password');
+  await worker.getByRole('button', { name: 'Save new password' }).click();
+  await expect(worker.getByRole('alert')).toHaveText('Passwords do not match.');
+  await worker.getByLabel('Confirm password', { exact: true }).fill(newPassword);
+  await worker.getByRole('button', { name: 'Save new password' }).click();
+  await expect(worker.getByRole('alert')).toContainText('Password updated');
+  await worker.getByLabel('Email', { exact: true }).fill(invitedEmail);
+  await worker.getByLabel('Password', { exact: true }).fill(newPassword);
+  await worker.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(worker.locator('.workspace small')).toHaveText('Employee');
+  await context.close();
+});

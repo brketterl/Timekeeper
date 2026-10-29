@@ -39,7 +39,7 @@ async function loadAccessPanel() {
         <div class="form-grid"><label>Email<input name="email" type="email" maxlength="254" required></label>
         <label>Role<select name="role"><option value="employee">Employee</option><option value="admin">Admin</option></select></label>
         <label class="full">Employee record<select name="employeeId"><option value="">Match email or create a record on acceptance</option>${state.employees.filter(e => e.active && !members.some(m => m.employeeId === e.id)).map(e => `<option value="${esc(e.id)}">${esc(e.name)} · ${esc(e.email || 'No email')}</option>`).join('')}</select></label></div>
-        <button class="primary" type="submit">Create invitation link</button><small>Links expire in seven days. Share the generated link yourself; no email is sent.</small>
+        <button class="primary" type="submit">Create invitation link</button><small>Links expire in seven days. When email delivery is enabled, the invitation is emailed automatically. You can also copy the link.</small>
       </form><div id="invite-result" role="status"></div>
       <h3>Members</h3>${members.map(m => `<div class="row wrap between"><div><strong>${esc(m.name)}</strong><br><small>${esc(m.email)} · ${esc(m.role)}</small></div><div class="row"><button onclick="changeMember('${m.userId}','${m.role === 'admin' ? 'employee' : 'admin'}')">Make ${m.role === 'admin' ? 'employee' : 'admin'}</button><button class="danger" onclick="removeMember('${m.userId}')">Remove access</button></div></div>`).join('')}
       <h3>Pending invitations</h3>${invites.filter(i => !i.acceptedAt && !i.revokedAt && i.expiresAt > Date.now()).map(i => `<div class="row between wrap"><span>${esc(i.email)} · ${esc(i.role)}</span><button onclick="revokeInvitation('${i.id}')">Revoke</button></div>`).join('') || '<small>No pending invitations.</small>'}
@@ -55,6 +55,9 @@ async function inviteMember(form) {
     await loadAccessPanel();
     const target = document.getElementById('invite-result');
     if (target) {
+      const delivery = document.createElement('p');
+      delivery.textContent = result.emailStatus === 'sent' ? 'Invitation email accepted. You can also share the link below.' : result.emailStatus === 'failed' ? 'The invitation was created, but email delivery failed. Share the link below or create a replacement invitation to retry.' : 'Email delivery is not configured. Share the link below.';
+      target.append(delivery);
       const label = document.createElement('label'); label.textContent = 'Copy and share this invitation link (shown once)';
       const input = document.createElement('input'); input.readOnly = true; input.value = `${location.origin}/#invite=${result.token}`;
       label.append(input); target.append(label); input.select();

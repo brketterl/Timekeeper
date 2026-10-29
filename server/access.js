@@ -131,6 +131,7 @@ export function accessStore(db) {
         db.prepare('UPDATE invitations SET revoked_at = ? WHERE workspace_id = ? AND employee_id = ? AND accepted_at IS NULL AND revoked_at IS NULL').run(Date.now(), link.workspace_id, employee.id);
       }
       db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email, session.user_id);
+      db.prepare('DELETE FROM password_resets WHERE user_id = ?').run(session.user_id);
       db.prepare('DELETE FROM sessions WHERE user_id = ?').run(session.user_id);
     });
   }

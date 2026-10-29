@@ -35,7 +35,7 @@ To remove an unused employee record, choose **Team → Remove from team**. Recor
 
 Saves use a revision check to reject stale updates from other tabs or devices. The header distinguishes saving, saved, and unsaved changes. If saving fails, export your changes before reloading the server copy; the app does not silently overwrite newer data.
 
-Encrypted database recovery, scheduling, and optional Google Drive uploads are available; see [Database recovery backups](docs/backups.md) for local testing, encryption-key handling, Google authorization, and Render configuration. They run in the existing service and are disabled until configured. The Settings recovery panel reports separate local and Google timestamps. Only explicitly configured server backup operators can download full recovery copies after confirming their password. Other workspace admins cannot download every workspace's accounts or records.
+Encrypted database recovery, scheduling, and optional Google Drive uploads are available; see [Database recovery backups](docs/backups.md) for local testing, encryption-key handling, Google authorization, and Render configuration. They run in the existing service and are disabled until configured. The Settings recovery panel reports separate local and off-site timestamps. Only explicitly configured server backup operators can download full recovery copies after confirming their password. Other workspace admins cannot download every workspace's accounts or records.
 
 Do not copy only the main SQLite file while WAL writes are active. Recovery archives use SQLite's online backup API. Keep encrypted copies outside the hosting disk and keep the encryption key separately. The JSON export remains an additional workspace-level copy; it does not recover accounts or memberships.
 
@@ -72,6 +72,9 @@ All bodies are JSON; mutation requests require an `Origin` matching the applicat
 | Method | Path | Behavior |
 | --- | --- | --- |
 | `POST` | `/api/auth/register` | `{name,email,password,inviteToken?}` creates an account and session; optional invitation joins an existing workspace |
+| `GET` | `/api/auth/features` | Reports whether account email is enabled |
+| `POST` | `/api/auth/forgot-password` | `{email}`; generic confirmation and rate-limited email when configured |
+| `POST` | `/api/auth/reset-password` | `{token,password}`; single-use reset and session revocation |
 | `POST` | `/api/auth/login` | `{email,password,inviteToken?}` creates a session and optionally accepts an invitation |
 | `POST` | `/api/auth/logout` | Revokes current session |
 | `GET` | `/api/auth/me` | Returns signed-in identity, employee link, active workspace, and role |
@@ -118,11 +121,11 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-The browser tests use a new temporary SQLite database, not the developer's or production's data. Playwright is a development-only dependency; the running server still has no third-party runtime dependencies.
+The browser tests use a new temporary SQLite database, not the developer's or production's data. Playwright is a development-only dependency; the running server uses the AWS SDK for R2 uploads.
 
 ## Next backend work
 
-- Email verification, password reset, and account recovery (not implemented yet).
+- Email verification and administrative account recovery beyond emailed password resets.
 - Resource-level business APIs, normalized financial tables, and an audit history.
 - Independent monitoring for a completely stopped service. Google/R2 connectivity and off-site restore checks require your own configured account.
 
@@ -131,3 +134,5 @@ Invoice sending currently records a date; it does not send email. Payments are r
 Cloudflare R2 encrypted recovery backups are supported on staging; see [R2 setup and restore checks](docs/backups.md#cloudflare-r2-recommended-alternative-to-google-drive). No additional Render service is required.
 
 Optional [backup alert emails through Resend](docs/backup-alerts.md) notify the server operator about failed backups, 48-hour overdue off-site uploads, and recovery. Configure separately after testing; alerts are disabled by default.
+
+[Password reset and invitation email setup](docs/account-email.md) reuses Resend and the configured app domain. Account email is opt-in via `AUTH_EMAIL_ENABLED`; migration 3 requires a verified pre-release recovery backup.

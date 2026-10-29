@@ -60,5 +60,12 @@ export function openDatabase(directory) {
       db.exec('INSERT INTO schema_migrations VALUES (2); COMMIT;');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
   }
+  if (!db.prepare('SELECT 1 FROM schema_migrations WHERE version = 3').get()) {
+    db.exec(`BEGIN;
+      CREATE TABLE password_resets (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL UNIQUE REFERENCES users(id),
+        email TEXT NOT NULL, credential_hash TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+      INSERT INTO schema_migrations VALUES (3);
+      COMMIT;`);
+  }
   return db;
 }
