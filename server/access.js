@@ -1,12 +1,13 @@
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { isGovernment, rowTerms, governmentInvoice } from '../public/billing.js';
 import { auditStore } from './audit.js';
 import { validBackup } from './validation.js';
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const digest = value => createHash('sha256').update(value).digest('hex');
 const roles = ['admin', 'employee'];
-const rowView = r => ({ id: r.id, contractId: r.contractId, status: r.status, hours: r.hours, note: r.note });
+const rowView = r => ({ id: r.id, contractId: r.contractId, status: r.status, hours: r.hours, note: r.note, ...(r.taskOrderId ? { taskOrderId: r.taskOrderId, laborCategory: r.laborCategory } : {}) });
 const sheetView = s => ({ id: s.id, employeeId: s.employeeId, start: s.start, status: s.status, rows: s.rows.map(rowView) });
 const equal = isDeepStrictEqual;
 
@@ -68,13 +69,13 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       const sheets = doc.data.sheets.filter(s => s.employeeId === employee.id);
       const visibleContracts = new Set([...employee.contracts, ...sheets.flatMap(s => s.rows.map(r => r.contractId))]);
       doc.data = { version: 2, demo: false, settings: { business: doc.data.settings.business, schedule: 'semimonthly' },
-        employees: [{ id: employee.id, name: employee.name, email: employee.email, active: employee.active, contracts: employee.contracts }], contracts: doc.data.contracts.filter(c => visibleContracts.has(c.id)).map(c => ({ id: c.id, name: c.name, client: c.client, active: c.active })),
+        employees: [{ id: employee.id, name: employee.name, email: employee.email, active: employee.active, contracts: employee.contracts }], contracts: doc.data.contracts.filter(c => visibleContracts.has(c.id)).map(c => ({ id: c.id, name: c.name, client: c.client, active: c.active, ...(isGovernment(c) ? { invoiceTemplate: 'government', taskOrders: c.billing?.taskOrders?.map(o=>({id:o.id,number:o.number,popStart:o.popStart,popEnd:o.popEnd})) || [] } : {}) })),
         sheets: sheets.map(sheetView), invoices: [] };
     }
     return { ...doc, role: session.role, employeeId: session.employee_id, workspaceId: session.workspace_id,
       ...(session.role === 'admin' ? { memberEmployeeIds } : {}) };
   }
-  function writeAdmin(session, input) {
+  function writeAdmin(session, input, { restore = false } = {}) {
     return transaction(() => {
       if (!input.data || !validBackup(input.data)) throw fail(400, 'Invalid workspace data.');
       for (const member of members(session.workspace_id)) {
@@ -82,8 +83,25 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
         if (!employee?.active || employee.email.toLowerCase() !== member.email.toLowerCase()) throw fail(409, 'Keep linked account employee records active with their account email. Remove workspace access first to archive an employee.');
       }
       const before = document(session.workspace_id).data;
+      for (const old of restore ? [] : before.invoices) {
+        const incoming = input.data.invoices.find(i=>i.id===old.id);
+        if (old.government && old.sentDate && (!incoming || !equal({ ...old, payments: [] }, { ...incoming, payments: [] }))) throw fail(409,'Issued invoices cannot be changed or removed. Record payments separately.');
+        if (old.government && incoming && !equal({ ...old, payments: [], sentDate: null }, { ...incoming, payments: [], sentDate: null })) throw fail(409,'Government invoice snapshots cannot be edited. Delete an unsent draft and recreate it.');
+      }
+      if(!restore&&input.data.invoices.some(i=>i.government&&!before.invoices.some(old=>old.id===i.id))) throw fail(400,'Create government invoices using the monthly billing action.');
+      for(const sheet of restore ? [] : input.data.sheets) for(const row of sheet.rows) {
+        const c=input.data.contracts.find(c=>c.id===row.contractId);
+        if(!isGovernment(c)) continue;
+        const old=before.sheets.find(s=>s.id===sheet.id)?.rows.find(r=>r.id===row.id);
+        if(old&&!old.taskOrderId&&!row.taskOrderId&&(equal(old,row)||(row.status==='draft'&&equal({...row,status:old.status},old))))continue;
+        if(old && old.status!=='draft') {
+          if(row.taskOrderId!==old.taskOrderId) throw fail(409,'Withdraw or reopen time before changing its task order.');
+          Object.assign(row,{rate:old.rate,taskOrderId:old.taskOrderId,categoryId:old.categoryId,laborCategory:old.laborCategory});
+        } else { try { Object.assign(row,rowTerms(c,sheet.employeeId,row)); } catch(e) { throw fail(400,e.message); } }
+      }
       const result = write(session.workspace_id, input.data, input.revision);
       audit.changes(session, before, input.data);
+      if(restore)log(session,'workspace.restored',session.workspace_id,'Restored workspace JSON backup');
       return result;
     });
   }
@@ -100,7 +118,7 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
         if (old && old.start !== s.start) throw fail(403, 'Timesheet dates cannot be changed.');
         if (old?.rows.some(r => r.status !== 'draft' && !s.rows.some(row => row.id === r.id))) throw fail(403, 'Locked rows cannot be removed.');
         const rows = s.rows.map(r => {
-          if (!r || Object.keys(r).some(k => !['id', 'contractId', 'status', 'hours', 'note'].includes(k))) throw fail(400, 'Invalid time entry fields.');
+          if (!r || Object.keys(r).some(k => !['id', 'contractId', 'status', 'hours', 'note', 'taskOrderId', 'laborCategory'].includes(k))) throw fail(400, 'Invalid time entry fields.');
           const previous = old?.rows.find(x => x.id === r.id);
           if (previous?.status === 'approved') {
             if (!equal(rowView(previous), r)) throw fail(403, 'Approved hours are locked.');
@@ -113,7 +131,9 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
           if (!['draft', 'submitted'].includes(r.status)) throw fail(403, 'Only admins can approve hours.');
           const contract = doc.data.contracts.find(c => c.id === r.contractId);
           if ((!previous || !equal(rowView(previous), r)) && (!contract?.active || !employee.contracts.includes(r.contractId))) throw fail(403, 'Use an active assigned contract.');
-          return { ...r, rate: r.status === 'submitted' || !previous ? contract?.rate : previous.rate };
+          let terms;
+          try { terms = rowTerms(contract, employee.id, r); } catch(e) { throw fail(400,e.message); }
+          return { ...r, rate: r.status === 'submitted' || !previous ? terms.rate : previous.rate, ...(isGovernment(contract) ? terms : {}) };
         });
         return { ...s, rows };
       });
@@ -168,7 +188,10 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       if (members(session.workspace_id).some(m => m.employeeId === employeeId)) throw fail(409, 'This person has sign-in access. Correct your own email in My account, or remove their workspace access before removing the Team record.');
       const hasHistory = doc.data.sheets.some(s => s.employeeId === employeeId);
       if (hasHistory) employee.active = false;
-      else doc.data.employees = doc.data.employees.filter(e => e.id !== employeeId);
+      else {
+        doc.data.employees = doc.data.employees.filter(e => e.id !== employeeId);
+        for(const c of doc.data.contracts)if(c.billing?.assignments)c.billing.assignments=c.billing.assignments.filter(a=>a.employeeId!==employeeId);
+      }
       const result = write(session.workspace_id, doc.data, input.revision);
       for (const prior of db.prepare('SELECT id FROM invitations WHERE workspace_id=? AND accepted_at IS NULL AND revoked_at IS NULL AND (employee_id=? OR (employee_id IS NULL AND email=?))').all(session.workspace_id, employeeId, employee.email)) log(session, 'invitation.revoked', prior.id, 'Revoked invitation when removing employee', { reason: 'employee_removed' });
       db.prepare(`UPDATE invitations SET revoked_at = ? WHERE workspace_id = ? AND accepted_at IS NULL
@@ -177,6 +200,16 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       log(session, hasHistory ? 'employee.archived' : 'employee.removed', employeeId, `${hasHistory ? 'Archived' : 'Removed'} employee: ${employee.name}`);
       return { ...result, action: hasHistory ? 'archived' : 'deleted' };
     });
+    if (path === '/api/invoices/government' && method === 'POST') return transaction(() => {
+      const doc=document(session.workspace_id),before=structuredClone(doc.data);
+      if(input.revision!==doc.revision)throw fail(409,'Workspace changed. Reload before creating this invoice.');
+      let invoice;
+      try { invoice=governmentInvoice(doc.data,input,randomUUID()); } catch(e) { throw fail(400,e.message); }
+      const result=write(session.workspace_id,doc.data,doc.revision);
+      audit.changes(session,before,doc.data);
+      return {...result,invoiceId:invoice.id};
+    });
+    if (path === '/api/workspace/import' && method === 'POST') return writeAdmin(session,input,{restore:true});
     if (path === '/api/workspace' && method === 'PUT') return writeAdmin(session, input);
     if (path === '/api/timesheet-notifications/retry' && method === 'POST') return retryNotifications(session.workspace_id);
     if (path === '/api/timesheet-notifications/status' && method === 'GET') return notificationStatus(session.workspace_id);

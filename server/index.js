@@ -93,7 +93,11 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         const html = await readFile(new URL('../public/index.html', import.meta.url));
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(html);
       }
-      if (req.method === 'GET' && ['/auth.js', '/access.js', '/backups.js', '/activity.js', '/notifications.js'].includes(path)) {
+      if (req.method === 'GET' && path === '/billing.js') {
+        res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
+        return res.end(await readFile(new URL('../public/billing.js', import.meta.url)));
+      }
+      if (req.method === 'GET' && ['/auth.js', '/access.js', '/backups.js', '/activity.js', '/notifications.js', '/government.js'].includes(path)) {
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
         return res.end(await readFile(new URL(`../public${path}`, import.meta.url)));
       }
