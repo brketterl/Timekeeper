@@ -1,5 +1,5 @@
 let revision = 0, pendingSaves = 0, saveFailure = '', saveQueue = Promise.resolve();
-let authMode = 'login', signedInUser = null, accountEmailEnabled = false;
+let authMode = 'login', signedInUser = null, accountEmailEnabled = false, publicRegistration = false;
 let resetToken = new URLSearchParams(location.hash.slice(1)).get('reset') || '';
 let inviteToken = new URLSearchParams(location.hash.slice(1)).get('invite') || '';
 let invitationInfo = null, accountRole = 'admin', linkedEmployeeId = '', protectedEmployees = [], workspaces = [], workspaceId = '';
@@ -16,6 +16,7 @@ async function api(path, options = {}) {
 
 function authScreen(message = '') {
   if (authMode === 'forgot') return forgotScreen();
+  if (authMode === 'register' && !invitationInfo && !publicRegistration) authMode = 'login';
   const registering = authMode === 'register';
   document.getElementById('app').innerHTML = `<div style="max-width:440px;margin:10vh auto;padding:24px" class="panel">
     <h1>Timekeeper</h1><p style="margin:12px 0 24px">${invitationInfo ? `Join ${esc(invitationInfo.workspaceName)} as ${esc(invitationInfo.role)}. Use ${esc(invitationInfo.email)}.` : registering ? 'Create your account and workspace.' : 'Sign in to your workspace.'}</p>
@@ -27,7 +28,7 @@ function authScreen(message = '') {
       ${registering ? '<small>Use at least 12 characters.</small>' : ''}
       <button class="primary" type="submit">${registering ? 'Create account' : 'Sign in'}</button>
       ${!registering && accountEmailEnabled ? '<button type="button" onclick="authMode=\'forgot\';authScreen()">Forgot password?</button>' : ''}
-      <button type="button" onclick="authMode='${registering ? 'login' : 'register'}';authScreen()">${registering ? 'Already have an account? Sign in' : 'Create an account'}</button>
+      ${(registering || invitationInfo || publicRegistration) ? `<button type="button" onclick="authMode='${registering ? 'login' : 'register'}';authScreen()">${registering ? 'Already have an account? Sign in' : 'Create an account'}</button>` : '<small>Accounts are invitation-only. Ask your workspace admin for an invitation.</small>'}
     </form></div>`;
 }
 
@@ -61,8 +62,12 @@ async function loadWorkspace() {
 
 async function bootstrap() {
   if (resetToken) { history.replaceState(null, '', location.pathname); resetScreen(); return; }
-  try { accountEmailEnabled = (await api('/api/auth/features')).enabled; } catch { accountEmailEnabled = false; }
+  try {
+    const features = await api('/api/auth/features');
+    accountEmailEnabled = features.enabled; publicRegistration = features.publicRegistration === true;
+  } catch { accountEmailEnabled = false; publicRegistration = false; }
   if (inviteToken) {
+    invitationInfo = null;
     try { invitationInfo = await api('/api/invitations/preview', { method: 'POST', body: JSON.stringify({ token: inviteToken }) }); }
     catch (error) { authScreen(error.message); return; }
     try {

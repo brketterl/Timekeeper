@@ -45,7 +45,7 @@ async function body(req) {
   catch { throw fail(400, 'Invalid JSON.'); }
 }
 
-export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), secureCookies = process.env.NODE_ENV === 'production', allowedOrigin = process.env.APP_ORIGIN, backupConfig = null, accountEmailConfig = null, authAttemptLimit = 20 } = {}) {
+export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), secureCookies = process.env.NODE_ENV === 'production', allowedOrigin = process.env.APP_ORIGIN, backupConfig = null, accountEmailConfig = null, authAttemptLimit = 20, allowPublicRegistration = false } = {}) {
   if (secureCookies && !allowedOrigin) throw Error('APP_ORIGIN is required in production.');
   if (allowedOrigin) {
     const origin = new URL(allowedOrigin);
@@ -100,7 +100,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         const expectedOrigin = allowedOrigin || `http://${req.headers.host}`;
         if (req.headers.origin !== expectedOrigin) throw fail(403, 'Request origin is not allowed.');
       }
-      if (req.method === 'GET' && path === '/api/auth/features') return send(200, accounts.status());
+      if (req.method === 'GET' && path === '/api/auth/features') return send(200, { ...accounts.status(), publicRegistration: allowPublicRegistration });
       if (req.method === 'POST' && path === '/api/auth/forgot-password') {
         checkAuthLimit(req);
         const input = await body(req);
@@ -129,6 +129,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         const password = input.password;
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254 || typeof password !== 'string' || password.length > 256) throw fail(400, 'Enter a valid email and password.');
         if (path.endsWith('/register')) {
+          if (!allowPublicRegistration && !input.inviteToken) throw fail(403, 'An invitation is required to create an account. Ask your workspace admin for an invitation.');
           const name = typeof input.name === 'string' ? input.name.trim() : '';
           if (!name || name.length > 100 || password.length < 12) throw fail(400, 'Provide your name and a password of at least 12 characters.');
           const passwordHash = await hashPassword(password);
@@ -245,11 +246,12 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
 
 export function deploymentOptions(env = process.env) {
   const production = env.NODE_ENV === 'production';
+  if (env.ALLOW_PUBLIC_REGISTRATION && !['true', 'false'].includes(env.ALLOW_PUBLIC_REGISTRATION)) throw Error('ALLOW_PUBLIC_REGISTRATION must be true or false.');
   const port = Number(env.PORT || 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw Error('PORT must be an integer from 1 to 65535.');
   return {
     port, host: env.HOST || (production ? '0.0.0.0' : '127.0.0.1'),
-    dataDir: resolve(env.DATA_DIR || '.data'), secureCookies: production,
+    dataDir: resolve(env.DATA_DIR || '.data'), secureCookies: production, allowPublicRegistration: env.ALLOW_PUBLIC_REGISTRATION === 'true',
     allowedOrigin: env.APP_ORIGIN || env.RENDER_EXTERNAL_URL
   };
 }

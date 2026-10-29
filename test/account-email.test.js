@@ -12,7 +12,7 @@ const password = 'original secure password', updated = 'updated secure password'
 const resetToken = email => /#reset=([a-f0-9]{64})/.exec(email.text)[1];
 async function fixture(t, { enabled = true, fail = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'timekeeper-account-mail-')), sent = [];
-  const server = createApp({ dataDir: directory, secureCookies: false, allowedOrigin: null,
+  const server = createApp({ allowPublicRegistration: true, dataDir: directory, secureCookies: false, allowedOrigin: null,
     accountEmailConfig: enabled ? { origin: 'https://timekeeper.example.test', send: async message => { if (fail) throw Error('provider secret'); sent.push(message); } } : null });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const origin = `http://127.0.0.1:${server.address().port}`;

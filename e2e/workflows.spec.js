@@ -183,3 +183,14 @@ test('emailed invitation and password reset work without losing workspace access
   await expect(worker.locator('.workspace small')).toHaveText('Employee');
   await context.close();
 });
+
+test('default sign-in page is invitation-only and direct registration is rejected', async ({ page }) => {
+  await page.goto('http://127.0.0.1:3102/');
+  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+  await expect(page.getByText('Accounts are invitation-only.', { exact: false })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Create an account', exact: true })).toHaveCount(0);
+  const response = await page.request.post('http://127.0.0.1:3102/api/auth/register', {
+    headers: { Origin: 'http://127.0.0.1:3102' }, data: { name: 'Uninvited', email: email('uninvited'), password, role: 'admin' }
+  });
+  expect(response.status()).toBe(403);
+});

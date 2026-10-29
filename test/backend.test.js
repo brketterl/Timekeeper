@@ -15,7 +15,7 @@ async function fixture(t, options = {}) {
   async function start() {
     // Test HTTP servers must not inherit the hosting process's cookies or origin.
     // Explicit production-cookie tests override these defaults below.
-    server = createApp({ dataDir: directory, secureCookies: false, allowedOrigin: null, ...options });
+    server = createApp({ allowPublicRegistration: true, dataDir: directory, secureCookies: false, allowedOrigin: null, ...options });
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     return `http://127.0.0.1:${server.address().port}`;
   }
@@ -382,4 +382,42 @@ test('former first admin with invoice history can be archived without losing fin
   assert.equal(result.data.employees[0].id, formerId); assert.equal(result.data.employees[0].active, false);
   assert.deepEqual(result.data.sheets, [sheet]); assert.deepEqual(result.data.invoices, [invoice]);
   assert.equal((await app.request('/api/auth/me', { cookie: admin.cookie })).status, 401);
+});
+
+test('invitation-only registration blocks direct signup, including an empty installation', async t => {
+  const app = await fixture(t, { allowPublicRegistration: false });
+  assert.equal((await app.request('/api/auth/features')).body.publicRegistration, false);
+  for (const inviteToken of [undefined, '', 'made-up-token', '0'.repeat(64)]) {
+    const result = await app.request('/api/auth/register', { method: 'POST', data: { ...account, inviteToken, role: 'admin', allowPublicRegistration: true } });
+    assert([403, 404, 410].includes(result.status));
+  }
+  const db = new DatabaseSync(join(app.directory, 'timekeeper.sqlite'));
+  try {
+    for (const table of ['users', 'workspaces', 'memberships', 'sessions']) assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0);
+  } finally { db.close(); }
+  assert.equal(deploymentOptions({}).allowPublicRegistration, false);
+  assert.equal(deploymentOptions({ NODE_ENV: 'production' }).allowPublicRegistration, false);
+  assert.equal(deploymentOptions({ ALLOW_PUBLIC_REGISTRATION: 'false' }).allowPublicRegistration, false);
+  assert.equal(deploymentOptions({ ALLOW_PUBLIC_REGISTRATION: 'true' }).allowPublicRegistration, true);
+  assert.throws(() => deploymentOptions({ ALLOW_PUBLIC_REGISTRATION: 'yes' }), /ALLOW_PUBLIC_REGISTRATION/);
+});
+
+test('closed registration permits only valid invitations and preserves assigned roles', async t => {
+  const config = { allowPublicRegistration: true }, app = await fixture(t, config);
+  const admin = await app.request('/api/auth/register', { method: 'POST', data: account });
+  config.allowPublicRegistration = false; await app.restart();
+  assert.equal((await app.request('/api/auth/register', { method: 'POST', data: { ...account, email: 'intruder@example.com' } })).status, 403);
+  for (const role of ['employee', 'admin']) {
+    const email = `${role}@example.com`;
+    const invite = await app.request('/api/invitations', { method: 'POST', cookie: admin.cookie, data: { email, role } });
+    assert.equal(invite.status, 200);
+    assert.equal((await app.request('/api/auth/register', { method: 'POST', data: { ...account, email: 'wrong@example.com', inviteToken: invite.body.token } })).status, 403);
+    const joined = await app.request('/api/auth/register', { method: 'POST', data: { ...account, email, inviteToken: invite.body.token, role: 'admin' } });
+    assert.equal(joined.status, 201);
+    assert.equal((await app.request('/api/auth/me', { cookie: joined.cookie })).body.role, role);
+    assert.equal((await app.request('/api/auth/register', { method: 'POST', data: { ...account, email: 'replay@example.com', inviteToken: invite.body.token } })).status, 410);
+  }
+  const db = new DatabaseSync(join(app.directory, 'timekeeper.sqlite'));
+  try { assert.equal(db.prepare('SELECT COUNT(*) AS n FROM workspaces').get().n, 1); assert.equal(db.prepare('SELECT COUNT(*) AS n FROM users').get().n, 3); }
+  finally { db.close(); }
 });

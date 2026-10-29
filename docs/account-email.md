@@ -2,6 +2,14 @@
 
 Developed on `staging`; production needs a separate release approval after local review. This feature reuses Resend and your verified sender. No extra Render service, mailbox, or runtime dependency is required.
 
+## Invitation-only registration
+
+Public signup is disabled by default. The ordinary sign-in page has no Create an account button. A valid invitation exposes account creation; the backend requires the invitation, verifies its email/expiry/revocation, and assigns its stored role. Posting directly to the registration API cannot bypass this rule, even when the database is empty.
+
+Keep `ALLOW_PUBLIC_REGISTRATION` unset or `false` on Render. `true` is an explicit operator override for isolated local setup/test installations; never enable it on this invitation-only hosted app. For a brand-new local development database only, run `ALLOW_PUBLIC_REGISTRATION=true npm start` to create a test owner, then stop and restart normally to close signup. No automatic first-user registration exception exists.
+
+Existing accounts, including previously self-created workspaces, are retained. This change prevents new uninvited registrations; it does not delete prior accounts or grant them access to other workspaces. Existing sign-in, password recovery, and emailed/manual invitations continue to work. No database migration is added by this signup restriction.
+
 ## What users see
 
 - Sign in → **Forgot password?** → enter the account email. A generic confirmation appears whether or not an account exists. Email delivery is asynchronous and never returned as an account-specific success/failure response.
