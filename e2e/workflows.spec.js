@@ -6,7 +6,10 @@ const email = prefix => `${prefix}-${randomUUID()}@example.test`;
 const saved = page => expect(page.locator('#save-label')).toHaveText('Saved to server');
 
 async function register(page, name, address) {
-  await page.getByRole('button', { name: 'Create an account', exact: true }).click();
+  await expect(page.getByRole('button', { name: /^(Create an account|Create account)$/ })).toBeVisible();
+  if (!await page.getByLabel('Your name', { exact: true }).isVisible()) {
+    await page.getByRole('button', { name: 'Create an account', exact: true }).click();
+  }
   await page.getByLabel('Your name', { exact: true }).fill(name);
   await page.getByLabel('Email', { exact: true }).fill(address);
   await page.getByLabel('Password', { exact: true }).fill(password);
@@ -156,8 +159,17 @@ test('emailed invitation and password reset work without losing workspace access
   await expect(page.locator('#invite-result')).toContainText('Invitation email accepted');
   const invitationEmails = await (await page.request.get('http://127.0.0.1:3101/?to=' + encodeURIComponent(invitedEmail))).json();
   expect(invitationEmails).toHaveLength(1); expect(invitationEmails[0].text).toContain(invitationLink);
+  await page.goto(invitationLink);
+  await expect(page.getByRole('dialog')).toContainText('You are signed in as');
+  await page.getByRole('button', { name: 'Sign out and open invited signup' }).click();
+  await expect(page.getByLabel('Your name', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Email', { exact: true })).toHaveValue(invitedEmail);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   const context = await browser.newContext(), worker = await context.newPage();
   await worker.goto(invitationEmails[0].text.match(/http:\/\/127\.0\.0\.1:3100\/#invite=[a-f0-9]+/)[0]);
+  await expect(worker.getByLabel('Your name', { exact: true })).toBeVisible();
+  await expect(worker.getByLabel('Email', { exact: true })).toHaveValue(invitedEmail);
+  await expect(worker.getByRole('dialog')).toHaveCount(0);
   await register(worker, 'Email worker', invitedEmail);
   await expect(worker.locator('.workspace small')).toHaveText('Employee');
   await worker.getByRole('button', { name: 'Sign out', exact: true }).click();

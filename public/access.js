@@ -1,7 +1,7 @@
 async function acceptInvitation() {
   try {
     await api('/api/invitations/accept', { method: 'POST', body: JSON.stringify({ token: inviteToken }) });
-    inviteToken = ''; history.replaceState(null, '', location.pathname); await loadWorkspace();
+    inviteToken = ''; invitationInfo = null; history.replaceState(null, '', location.pathname); await loadWorkspace();
   } catch (error) { toast(error.message); }
 }
 

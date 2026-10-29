@@ -15,6 +15,7 @@ async function api(path, options = {}) {
 }
 
 function authScreen(message = '') {
+  closeModal();
   if (authMode === 'forgot') return forgotScreen();
   if (authMode === 'register' && !invitationInfo && !publicRegistration) authMode = 'login';
   const registering = authMode === 'register';
@@ -23,7 +24,7 @@ function authScreen(message = '') {
     <form id="auth-form" class="stack" onsubmit="event.preventDefault();authenticate(this)">
       <div role="alert">${esc(message)}</div>
       ${registering ? '<label>Your name<input name="name" autocomplete="name" maxlength="100" required></label>' : ''}
-      <label>Email<input name="email" type="email" autocomplete="username" maxlength="254" required></label>
+      <label>Email<input name="email" type="email" autocomplete="username" maxlength="254" required value="${esc(invitationInfo?.email || '')}"></label>
       <label>Password<input name="password" type="password" autocomplete="${registering ? 'new-password' : 'current-password'}" ${registering ? 'minlength="12"' : ''} maxlength="256" required></label>
       ${registering ? '<small>Use at least 12 characters.</small>' : ''}
       <button class="primary" type="submit">${registering ? 'Create account' : 'Sign in'}</button>
@@ -39,7 +40,7 @@ async function authenticate(form) {
   try {
     const fields = new FormData(form);
     await api(`/api/auth/${authMode}`, { method: 'POST', body: JSON.stringify({ ...Object.fromEntries(fields), ...(inviteToken ? { inviteToken } : {}) }) });
-    inviteToken = ''; history.replaceState(null, '', location.pathname);
+    inviteToken = ''; invitationInfo = null; history.replaceState(null, '', location.pathname);
     await loadWorkspace();
   } catch (error) {
     form.querySelector('[role=alert]').textContent = error.message;
@@ -71,9 +72,16 @@ async function bootstrap() {
     try { invitationInfo = await api('/api/invitations/preview', { method: 'POST', body: JSON.stringify({ token: inviteToken }) }); }
     catch (error) { authScreen(error.message); return; }
     try {
-      await api('/api/auth/me');
-      showModal('Join workspace', `<p>Join ${esc(invitationInfo.workspaceName)} as ${esc(invitationInfo.role)} using ${esc(invitationInfo.email)}?</p>`, '<button onclick="logout()">Sign out to use another account</button><button class="primary" onclick="acceptInvitation()">Accept invitation</button>');
-    } catch { authScreen(); }
+      const identity = await api('/api/auth/me');
+      if (identity.user.email.toLowerCase() !== invitationInfo.email.toLowerCase()) {
+        showModal('Use the invited email', `<p>This invitation is for ${esc(invitationInfo.email)}. You are signed in as ${esc(identity.user.email)}.</p>`, '<button onclick="closeModal()">Cancel</button><button class="primary" onclick="logout()">Sign out and open invited signup</button>');
+        return;
+      }
+      showModal('Join workspace', `<p>Join ${esc(invitationInfo.workspaceName)} as ${esc(invitationInfo.role)} using ${esc(invitationInfo.email)}?</p>`, '<button onclick="logout()">Sign out to use the invited email</button><button class="primary" onclick="acceptInvitation()">Accept invitation</button>');
+    } catch (error) {
+      if (error.status !== 401) { authScreen('Could not check your sign-in status. Please reload and try again.'); return; }
+      authMode = 'register'; authScreen();
+    }
     return;
   }
   try { await loadWorkspace(); }
