@@ -264,4 +264,16 @@ test('government invoice setup creates a highlighted monthly PDF with locked cum
   await page.evaluate(()=>{document.getElementById('print-area').innerHTML=document.querySelector('.gov-paper').outerHTML;});
   const pdf=await page.pdf({path:info.outputPath('government-invoice.pdf'),format:'A4',printBackground:true});
   expect((pdf.toString('latin1').match(/\/Type\s*\/Page\b/g)||[]).length).toBe(1);
+  // A future invoice date must not prevent recording its actual send date.
+  const future=await (await page.request.get('/api/workspace')).json();
+  future.data.invoices[0].issued='2099-11-01';future.data.invoices[0].due='2099-12-01';
+  const restored=await page.request.post('/api/workspace/import',{headers:{Origin:'http://127.0.0.1:3100'},data:{data:future.data,revision:future.revision}});
+  expect(restored.status()).toBe(200);
+  await page.reload();await page.evaluate(()=>invoiceDetail(state.invoices[0].id));
+  await page.getByRole('button',{name:/^Mark sent/}).click();
+  await page.locator('#send-form [name=date]').fill('2026-10-28');
+  await page.getByRole('button',{name:'Mark sent',exact:true}).click();await saved(page);
+  const sent=await (await page.request.get('/api/workspace')).json();
+  expect(sent.data.invoices[0].sentDate).toBe('2026-10-28');
+
 });

@@ -94,3 +94,11 @@ test('multiple employees/categories and task orders keep distinct rates and fund
   const other=governmentInvoice(d,input('2026-08',{taskOrderId:'other-order'}),'second-order-invoice');
   assert.equal(other.government.cumulativeAmount,14500);assert.equal(other.government.funding,1000000);assert.equal(other.number,'C&C-TEST031');assert(validBackup(d));
 });
+
+test('future-dated invoices can record an actual earlier send date, but not a future send date',()=>{
+  const d=data();sheet(d,'aug','2026-08-01',8);
+  const invoice=governmentInvoice(d,input('2026-08',{issued:'2099-11-01',due:'2099-12-01'}),'future');
+  invoice.sentDate='2026-10-28';assert.equal(validBackup(d),true);
+  invoice.sentDate='2099-11-01';assert.equal(validBackup(d),false);
+  invoice.sentDate='invalid';assert.equal(validBackup(d),false);
+});
