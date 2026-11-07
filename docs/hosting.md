@@ -42,7 +42,7 @@ Code preparation and local integration tests do not prove this deployment works.
 
 ## Updates and backups
 
-Use [the staging and release workflow](releases.md) for later updates. Keep production on `main` with auto-deploy **Off**, test changes on a separate staging service, then manually deploy the approved `main` commit after review. These dashboard settings must be applied to an existing service; documentation alone does not enable them. Builds run backend tests before starting the new code. A single SQLite service with a disk can have a short interruption during deployments. Database files remain on the disk; application code comes from GitHub.
+Use [the staging and release workflow](releases.md) for later updates. Keep production on `main` with auto-deploy **On Commit**, test changes on the hosted staging service, then merge the approved release into `main` to deploy automatically. These dashboard settings must be applied to an existing service; documentation alone does not enable them. Builds run backend tests before starting the new code. A single SQLite service with a disk can have a short interruption during deployments. Database files remain on the disk; application code comes from GitHub.
 
 Before changing production data or deploying a database migration, make a restorable database backup. [Database recovery backups](backups.md) provides encrypted snapshots, restore verification, scheduling within the existing service, and optional uploads to Google Drive. Configure the encryption key and destination separately; deployment alone does not activate backups. Keep protected copies outside the hosting disk. Workspace JSON exports are useful additional copies but do not back up accounts.
 

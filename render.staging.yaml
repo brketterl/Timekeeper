@@ -1,4 +1,4 @@
-# Optional separate Blueprint. Select this file and the staging branch in Render.
+# Separate staging Blueprint. Select this file and the staging branch in Render.
 # This service must get its own disk, never the production disk.
 services:
   - type: web
