@@ -10,7 +10,7 @@ export function auditStore(db, { onEvent = () => {} } = {}) {
       VALUES(?,?,?,?,?,?,?,?,?)`).run(workspaceId, userId, actor.name, actor.role, type, entityId, summary.slice(0, 500), JSON.stringify(safeDetails), Date.now());
     onEvent({ id: Number(inserted.lastInsertRowid), workspaceId, actorId: userId, type, entityId, details: safeDetails });
   }
-  function changes(session, before, after) {
+  function changes(session, before, after, { restored = false } = {}) {
     const log = (type, id, text, details) => record(session.workspace_id, session.user_id, type, id, text, details);
     for (const sheet of after.sheets) {
       const old = before.sheets.find(s => s.id === sheet.id);
@@ -24,7 +24,7 @@ export function auditStore(db, { onEvent = () => {} } = {}) {
           if (action) transitions.set(action, (transitions.get(action) || 0) + 1);
         } else if (previous && row.status !== 'draft' && !equal(previous, row)) edited++;
       }
-      for (const [action, count] of transitions) log(`timesheet.${action}`, sheet.id, `${action[0].toUpperCase() + action.slice(1)} hours for ${who}`, { employeeId: sheet.employeeId, period: sheet.start, rows: count });
+      for (const [action, count] of transitions) log(`timesheet.${action}`, sheet.id, `${action[0].toUpperCase() + action.slice(1)} hours for ${who}`, { employeeId: sheet.employeeId, period: sheet.start, rows: count, ...(action==='submitted'&&!restored?{rowIds:sheet.rows.filter(row=>row.status==='submitted'&&old?.rows.find(r=>r.id===row.id)?.status!=='submitted').map(row=>row.id)}:{})});
       const removed = old?.rows.filter(row => !sheet.rows.some(r => r.id === row.id)).length || 0;
       if (removed) log('timesheet.rows_removed', sheet.id, `Removed time entries for ${who}`, { employeeId: sheet.employeeId, period: sheet.start, rows: removed, feedbackRows: old.rows.filter(row=>row.feedback?.length&&!sheet.rows.some(r=>r.id===row.id)).map(row=>({id:row.id,feedback:row.feedback})) });
       if (edited) log('timesheet.updated', sheet.id, `Updated locked or submitted hours for ${who}`, { employeeId: sheet.employeeId, period: sheet.start, rows: edited });

@@ -483,3 +483,32 @@ test('reviewer feedback survives employee correction and resubmission and cannot
  const activity=(await app.request('/api/activity',{cookie:admin.cookie})).body.events.filter(e=>e.type==='timesheet.feedback_added');
  assert.equal(activity.length,2);assert.equal(activity[0].actorId,admin.body.user.id);assert.equal(activity[0].details.reason,'Also confirm the project code.');
 });
+
+test('approval queue includes mixed and older sheets, isolates workspaces and preserves oldest row submission age', async t=>{
+ const {app,admin,worker}=await setupShared(t);
+ let doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body;
+ const row=(id,status,hours)=>({id,contractId:'assigned',rate:12500,status,note:'',hours:{'2026-09-01':hours}});
+ doc.data.sheets=[{id:'old-pending',employeeId:'worker',start:'2026-09-01',status:'draft',rows:[row('approved','approved',8),row('pending','submitted',2),row('draft','draft',1)]},{id:'new-pending',employeeId:'worker',start:'2026-10-01',status:'submitted',rows:[{...row('recent','submitted',4),hours:{'2026-10-01':4}}]},{id:'done',employeeId:'worker',start:'2026-11-01',status:'approved',rows:[{...row('done-row','approved',1),hours:{'2026-11-01':1}}]}];
+ const save=()=>app.request('/api/workspace',{method:'PUT',cookie:admin.cookie,data:{data:doc.data,revision:doc.revision}});
+ const reload=async()=>{doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body};
+ const queue=async()=> (await app.request('/api/approvals',{cookie:admin.cookie})).body.entries;
+ assert.equal((await save()).status,200);await reload();
+ const db=new DatabaseSync(join(app.directory,'timekeeper.sqlite'));t.after(()=>db.close());
+ const oldDate=Date.now()-5*86400000,newDate=Date.now()-86400000;
+ // Append fixture events; the audit log's no-update/no-delete protection stays enabled.
+ const appendSubmission=(sheetId,date,legacy=false)=>db.prepare(`INSERT INTO audit_events(workspace_id,actor_id,actor_name,actor_role,event_type,entity_id,summary,details,created_at)
+   SELECT workspace_id,actor_id,actor_name,actor_role,event_type,entity_id,summary,CASE WHEN ? THEN json_remove(details,'$.rowIds') ELSE details END,? FROM audit_events WHERE entity_id=? AND event_type='timesheet.submitted' ORDER BY id DESC LIMIT 1`).run(Number(legacy),date,sheetId);
+ appendSubmission('old-pending',oldDate);appendSubmission('new-pending',newDate);
+ let entries=await queue();assert.deepEqual(entries.map(e=>e.sheetId),['old-pending','new-pending']);assert.equal(entries[0].submittedHours,2);assert.equal(entries[0].submittedRows,1);assert.equal(entries[0].submittedAt,oldDate);
+ assert.equal((await app.request('/api/approvals',{cookie:worker.cookie})).status,403);
+ const outsider=await app.request('/api/auth/register',{method:'POST',data:{...account,email:'queue-outsider@example.test'}});
+ assert.deepEqual((await app.request('/api/approvals?workspaceId=forged',{cookie:outsider.cookie})).body.entries,[]);
+ doc.data.sheets[0].rows[2].status='submitted';doc.data.sheets[0].status='submitted';assert.equal((await save()).status,200);await reload();
+ entries=await queue();assert.equal(entries[0].submittedHours,3);assert.equal(entries[0].submittedAt,oldDate);
+ doc.data.sheets[0].rows[1].status='approved';assert.equal((await save()).status,200);await reload();
+ entries=await queue();assert.ok(entries[0].submittedAt>newDate);
+ doc.data.sheets[0].rows[2].status='draft';doc.data.sheets[0].rows[2].feedback=['Clarify this entry'];doc.data.sheets[0].status='draft';assert.equal((await save()).status,200);await reload();
+ assert.deepEqual((await queue()).map(e=>e.sheetId),['new-pending']);
+ appendSubmission('new-pending',newDate,true);
+ assert.equal((await queue())[0].submittedAt,null);
+});

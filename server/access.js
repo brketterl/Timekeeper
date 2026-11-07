@@ -122,7 +122,7 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
         } else { try { Object.assign(row,rowTerms(c,sheet.employeeId,row)); } catch(e) { throw fail(400,e.message); } }
       }
       const result = write(session.workspace_id, input.data, input.revision);
-      audit.changes(session, before, input.data);
+      audit.changes(session, before, input.data, { restored: restore });
       if(restore)log(session,'workspace.restored',session.workspace_id,'Restored workspace JSON backup');
       return result;
     });
@@ -236,6 +236,16 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
     if (path === '/api/workspace' && method === 'PUT') return writeAdmin(session, input);
     if (path === '/api/timesheet-notifications/retry' && method === 'POST') return retryNotifications(session.workspace_id);
     if (path === '/api/timesheet-notifications/status' && method === 'GET') return notificationStatus(session.workspace_id);
+    if(path==='/api/approvals'&&method==='GET'){
+      const doc=document(session.workspace_id),events=db.prepare("SELECT details,created_at FROM audit_events WHERE workspace_id=? AND entity_id=? AND event_type='timesheet.submitted' ORDER BY id DESC");
+      const entries=doc.data.sheets.filter(sheet=>sheet.rows.some(row=>row.status==='submitted')).map(sheet=>{
+        const rows=sheet.rows.filter(row=>row.status==='submitted'),history=events.all(session.workspace_id,sheet.id).map(event=>({...event,details:JSON.parse(event.details)}));
+        const submittedDates=rows.map(row=>{for(const event of history){if(!Array.isArray(event.details.rowIds))return null;if(event.details.rowIds.includes(row.id))return event.created_at}return null});
+        const person=doc.data.employees.find(e=>e.id===sheet.employeeId);
+        return {sheetId:sheet.id,employeeId:sheet.employeeId,employeeName:person.name,active:person.active,start:sheet.start,submittedHours:rows.reduce((total,row)=>total+Object.values(row.hours).reduce((n,h)=>n+h,0),0),submittedRows:rows.length,submittedAt:submittedDates.every(date=>date!==null)?Math.min(...submittedDates):null};
+      }).sort((a,b)=>a.start.localeCompare(b.start)||(a.submittedAt??0)-(b.submittedAt??0)||a.employeeName.localeCompare(b.employeeName));
+      return {entries};
+    }
     if (path === '/api/activity' && method === 'GET') return audit.list(session.workspace_id, input.before);
     if (path === '/api/members' && method === 'GET') return members(session.workspace_id);
     if (path === '/api/invitations' && method === 'GET') return db.prepare(`SELECT id, email, role, employee_id AS employeeId,

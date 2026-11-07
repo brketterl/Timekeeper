@@ -515,3 +515,41 @@ test('draft row undo, empty sheet deletion, contract archive and unused deletion
   await expect.poll(async()=> (await (await page.request.get('/api/workspace')).json()).data.invoices.length).toBe(0);
 
 });
+
+test('approval queue finds older mixed sheets, opens the right period and removes reviewed entries', async ({page},info)=>{
+ await page.goto('/');await register(page,'Queue reviewer',email('approval-queue'));
+ await page.evaluate(()=>{
+  state=retainAccounts(seed());
+  const old=state.sheets.find(s=>s.id==='old0');state.invoices=state.invoices.filter(i=>i.id!=='i0');
+  old.rows.push({id:'old-submitted',contractId:'c1',rate:12500,status:'submitted',note:'',hours:{[old.start]:2}},{id:'old-draft',contractId:'c1',rate:12500,status:'draft',note:'',hours:{[old.start]:1}});refreshSheet(old);save();render();
+ });await saved(page);
+ await page.locator('nav button[title=Approvals]').click();
+ const rows=page.locator('.approval-table tbody tr');await expect(rows).toHaveCount(2);
+ await expect(rows.first()).toContainText('You');await expect(rows.first()).toContainText('2 hrs');await expect(rows.first()).not.toContainText('51 hrs');
+ await expect(rows.first()).toContainText('Under 1 day');
+ await page.screenshot({path:info.outputPath('approval-queue-desktop.png'),fullPage:true});
+ await page.setViewportSize({width:390,height:844});await page.screenshot({path:info.outputPath('approval-queue-mobile.png'),fullPage:true});
+ const reviewBounds=await rows.first().getByRole('button',{name:/Review/}).boundingBox();expect(reviewBounds.x+reviewBounds.width).toBeLessThanOrEqual(390);
+ await page.setViewportSize({width:1280,height:720});
+ await page.getByRole('searchbox',{name:'Search approvals'}).fill('Maya');await expect(rows).toHaveCount(1);await expect(rows.first()).toContainText('Maya Chen');
+ await page.getByRole('searchbox',{name:'Search approvals'}).fill('no such employee');await expect(page.locator('#approval-results')).toContainText('No matching submissions');
+ await page.getByRole('searchbox',{name:'Search approvals'}).fill('');
+ const expected=await page.evaluate(()=>({start:state.sheets.find(s=>s.id==='old0').start,range:range(state.sheets.find(s=>s.id==='old0').start)}));
+ await rows.first().getByRole('button',{name:/Review/}).click();
+ await expect(page.getByRole('combobox',{name:'Timesheet employee'})).toHaveValue('e1');await expect(page.locator('.period-nav strong')).toHaveText(expected.range);
+ await page.getByRole('button',{name:'Approve submitted hours',exact:true}).click();await saved(page);
+ await page.getByRole('button',{name:'Back to approvals',exact:false}).click();await expect(rows).toHaveCount(1);await expect(rows.first()).toContainText('Maya Chen');
+ await rows.first().getByRole('button',{name:/Review/}).click();
+ await page.getByRole('button',{name:'Return submitted hours for changes',exact:true}).click();
+ await page.getByLabel('What needs to change?',{exact:true}).fill('Clarify the work performed.');await page.getByRole('button',{name:'Return to draft',exact:true}).click();await saved(page);
+ await page.getByRole('button',{name:'Back to approvals',exact:false}).click();await expect(page.locator('#approval-results')).toContainText('All caught up');
+ await page.reload();await page.locator('nav button[title=Approvals]').click();await expect(page.locator('#approval-results')).toContainText('All caught up');
+ const current=await (await page.request.get('/api/workspace')).json();
+ current.data.sheets.push({id:'concurrent-review',employeeId:'e2',start:'2026-09-16',status:'submitted',rows:[{id:'concurrent-row',contractId:'c1',rate:12500,status:'submitted',note:'',hours:{'2026-09-16':1}}]});
+ let committed=await page.request.put('/api/workspace',{headers:{Origin:'http://127.0.0.1:3100'},data:{data:current.data,revision:current.revision}});expect(committed.status()).toBe(200);
+ await page.getByRole('button',{name:'Refresh approvals',exact:true}).click();await expect(rows).toHaveCount(1);
+ const changed=await (await page.request.get('/api/workspace')).json();const pending=changed.data.sheets.find(s=>s.id==='concurrent-review');pending.status=pending.rows[0].status='approved';
+ committed=await page.request.put('/api/workspace',{headers:{Origin:'http://127.0.0.1:3100'},data:{data:changed.data,revision:changed.revision}});expect(committed.status()).toBe(200);
+ await rows.first().getByRole('button',{name:/Review/}).click();await expect(page.locator('#approval-results')).toContainText('All caught up');await expect(page.locator('#toast')).toContainText('already been reviewed or withdrawn');
+
+});
