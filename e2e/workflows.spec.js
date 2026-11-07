@@ -15,7 +15,7 @@ async function register(page, name, address) {
   await page.getByLabel('Email', { exact: true }).fill(address);
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
-  await expect(page.getByRole('navigation')).toBeVisible();
+  await expect(page.locator('.topbar')).toBeVisible();
 }
 async function invite(page, address, role) {
   await page.locator('nav button[title=Team]').click();
@@ -51,7 +51,7 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await page.getByRole('button', { name: 'Save employee', exact: true }).click();
   await saved(page);
 
-  const workerContext = await browser.newContext();
+  const workerContext = await browser.newContext({viewport:{width:390,height:844}});
   const worker = await workerContext.newPage();
   worker.on('pageerror', error => errors.push(error.message));
   await worker.goto(await invite(page, workerEmail, 'employee'));
@@ -60,6 +60,14 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await expect(worker.locator('.workspace small')).toHaveText('Employee');
   await expect(worker.locator('nav button[title=Activity]')).toHaveCount(0);
   await expect(worker.locator('nav button')).toHaveText(['Timesheets', 'Contracts']);
+  await expect(worker.getByRole('button',{name:/Menu/})).toHaveAttribute('aria-expanded','false');
+  await worker.getByRole('button',{name:/Menu/}).click();await expect(worker.getByRole('navigation')).toBeVisible();
+  await worker.keyboard.press('Escape');await expect(worker.getByRole('button',{name:/Menu/})).toHaveAttribute('aria-expanded','false');
+  await worker.getByRole('button',{name:/Menu/}).click();await worker.locator('nav button[title=Contracts]').click();
+  await expect(worker.getByRole('heading',{name:'Your assigned contracts',exact:true})).toBeVisible();
+  await worker.getByRole('button',{name:/Menu/}).click();await worker.locator('nav button[title=Timesheets]').click();
+  await expect(worker.locator('.mobile-timesheet')).toBeVisible();
+
   const employeeData = await (await worker.request.get('http://127.0.0.1:3100/api/workspace')).json();
   expect(employeeData.data.employees).toHaveLength(1);
   expect(employeeData.data.contracts[0]).not.toHaveProperty('rate');
@@ -78,7 +86,7 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await worker.getByRole('button', { name: 'Withdraw row', exact: true }).click();
   await worker.getByRole('button', { name: 'Confirm', exact: true }).click();
   await saved(worker);
-  await expect(worker.locator('.time-table tbody tr').first().locator('.badge')).toHaveText('Draft');
+  await expect(worker.locator('.mobile-time-entry .badge').first()).toHaveText('Draft');
   await expect(worker.locator('input[type=number]').first()).toBeEnabled();
   await worker.getByRole('button', { name: 'Submit draft hours', exact: true }).click();
   await saved(worker);
@@ -592,4 +600,40 @@ test('standard invoice selection limits periods and entries and edits drafts in 
  await page.getByRole('button',{name:'Close dialog'}).click();await page.getByRole('button',{name:'Create invoice',exact:true}).click();await expect(page.locator('#invoice-preview')).toContainText('6 hours');await expect(page.locator('#invoice-entry-list input')).toHaveCount(2);
  await page.getByRole('button',{name:'Cancel',exact:true}).click();await page.reload();await expect(page.getByRole('navigation')).toBeVisible();
  const persisted=(await (await page.request.get('/api/workspace')).json()).data.invoices.find(i=>i.id===invoice.id);expect(persisted.lines).toEqual(edited.lines);expect(persisted.client).toBe('Corrected client name');
+});
+
+test('mobile day entry validates hours, preserves dates and grid data, and handles leap-day boundaries',async({page},info)=>{
+ await page.goto('/');await register(page,'Mobile admin',email('mobile-day'));
+ await page.evaluate(()=>{
+  state=retainAccounts(seed());const s=state.sheets.find(s=>s.id==='s1');s.rows.forEach(row=>{row.hours={};row.status='draft'});refreshSheet(s);save();openSheet('e1',s.start);
+ });await saved(page);
+ await page.setViewportSize({width:320,height:844});await expect(page.locator('.mobile-timesheet')).toBeVisible();
+ const firstDay=await page.evaluate(()=>period);await page.locator('#timesheet-day').fill(firstDay);await page.locator('#timesheet-day').press('Tab');
+ const day=firstDay,rows=page.locator('.mobile-time-entry');
+ await rows.nth(0).getByRole('spinbutton').fill('8.25');await rows.nth(0).getByRole('spinbutton').press('Tab');await saved(page);
+ await rows.nth(1).getByRole('spinbutton').fill('2');await rows.nth(1).getByRole('spinbutton').press('Tab');await saved(page);
+ await expect(page.locator('#mobile-day-total')).toHaveText('10.25');await expect(page.locator('#mobile-period-total')).toHaveText('10.25');
+ await rows.nth(1).getByRole('spinbutton').fill('20');await rows.nth(1).getByRole('spinbutton').press('Tab');await expect(rows.nth(1).getByRole('spinbutton')).toHaveValue('2');await expect(page.locator('#toast')).toContainText('Daily totals cannot exceed 24');
+ await rows.nth(0).getByRole('spinbutton').fill('8.1');await rows.nth(0).getByRole('spinbutton').press('Tab');await expect(rows.nth(0).getByRole('spinbutton')).toHaveValue('8.25');
+ await page.getByRole('button',{name:'Next day',exact:true}).click();await expect(page.locator('#mobile-day-total')).toHaveText('0');
+ await rows.nth(0).getByRole('spinbutton').fill('1.5');await rows.nth(0).getByRole('spinbutton').press('Tab');await saved(page);await expect(page.locator('#mobile-period-total')).toHaveText('11.75');
+ await rows.nth(0).getByRole('spinbutton').fill('1.75');
+ await page.setViewportSize({width:1280,height:900});await expect(page.locator('.time-table')).toBeVisible();await saved(page);
+ await page.setViewportSize({width:320,height:844});await expect(page.locator('.mobile-timesheet')).toBeVisible();await expect(rows.nth(0).getByRole('spinbutton')).toHaveValue('1.75');await expect(page.locator('#mobile-period-total')).toHaveText('12');
+ await page.getByRole('button',{name:'Previous day',exact:true}).click();await expect(page.locator('#timesheet-day')).toHaveValue(day);await expect(rows.nth(0).getByRole('spinbutton')).toHaveValue('8.25');
+ await expect(page.locator('#toast')).toBeEmpty({timeout:5000});
+ await page.screenshot({path:info.outputPath('mobile-day-320.png'),fullPage:true});
+ expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+ await page.getByRole('button',{name:'Grid view',exact:true}).click();await expect(page.locator('.time-table')).toBeVisible();expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+ await page.getByRole('button',{name:'Day view',exact:true}).click();await expect(rows.nth(0).getByRole('spinbutton')).toHaveValue('8.25');
+ await page.getByRole('button',{name:/Menu/}).click();await expect(page.locator('nav button[title=Approvals]')).toBeVisible();await page.screenshot({path:info.outputPath('mobile-menu.png'),fullPage:true});
+ await page.getByRole('button',{name:'My account',exact:true}).click();await expect(page.getByRole('dialog')).toBeVisible();await page.getByRole('button',{name:'Close dialog'}).click();
+ await page.setViewportSize({width:768,height:1024});await expect(page.locator('.mobile-timesheet')).toBeVisible();await page.screenshot({path:info.outputPath('mobile-day-tablet.png'),fullPage:true});expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(768);
+ await page.evaluate(()=>{timesheetMode='auto';const sheet={id:'mobile-leap',employeeId:'e1',start:'2028-02-16',status:'draft',rows:[{id:'leap-row',contractId:'c1',rate:12500,status:'draft',note:'',hours:{}}]};state.sheets.push(sheet);save();openSheet('e1',sheet.start)});await saved(page);
+ await page.locator('#timesheet-day').fill('2028-02-29');await page.locator('#timesheet-day').press('Tab');await expect(page.getByRole('button',{name:'Next day',exact:true})).toBeDisabled();
+ await rows.nth(0).getByRole('spinbutton').fill('4');await rows.nth(0).getByRole('spinbutton').press('Tab');await saved(page);
+ await page.locator('#timesheet-day').fill('2028-03-01');await page.locator('#timesheet-day').press('Tab');await expect(page.locator('#timesheet-day')).toHaveValue('2028-02-29');
+ await page.setViewportSize({width:1280,height:900});await expect(page.locator('.time-table')).toBeVisible();await page.getByRole('button',{name:'Day view',exact:true}).click();await expect(page.locator('#timesheet-day')).toHaveValue('2028-02-29');
+ const doc=await (await page.request.get('/api/workspace')).json();expect(doc.data.sheets.find(s=>s.id==='mobile-leap').rows[0].hours['2028-02-29']).toBe(4);
+ await page.reload();await expect(page.getByRole('navigation')).toBeVisible();const persisted=await (await page.request.get('/api/workspace')).json();expect(persisted.data.sheets.find(s=>s.id==='s1').rows[0].hours[day]).toBe(8.25);
 });

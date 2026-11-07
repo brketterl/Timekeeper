@@ -37,3 +37,11 @@ Create invoice opens on the most recent period with eligible approved rows. Sele
 On an unsent standard invoice, Edit draft can change its selected entries, invoice and due dates, bill-to name/email/address, and invoice note. Cancel discards the edit. Saving retains the invoice ID, number, original business details, and unchanged source lines. Removing an entry releases it for later billing. Sent and voided invoices remain locked; use the correction workflow instead. Government invoices retain their monthly task-order workflow and frozen snapshots; unsent government drafts can still be deleted and recreated.
 
 No database migration or new invoice data fields are required for entry selection or standard draft editing.
+
+## Mobile time entry and navigation
+
+At widths up to 900 pixels, Timesheets defaults to Day view. Use the date picker or previous/next-day buttons to enter hours across contracts for a single day. The day total updates while the period total remains visible; expand the period summary for billing value and CSV export on admin accounts. Choose Grid view for the full period grid, or Day view on desktop. The view choice lasts for the current browser tab; a reload uses the screen-size default.
+
+Changing views or rotating the device keeps recorded hours. The same quarter-hour increments, 24-hour combined daily limit, task-order date rules, and submitted/approved locks apply. Work notes cover the entire contract row for the period. Submit draft hours submits all draft rows in the period, including other dates; it is not a one-day submission.
+
+Menu opens labeled navigation and account actions on small screens, and closes after choosing a page or pressing Escape. Employees see their permitted Timesheets and Contracts pages. All these changes use the existing workspace data and require no database migration.
