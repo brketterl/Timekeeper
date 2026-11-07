@@ -553,3 +553,43 @@ test('approval queue finds older mixed sheets, opens the right period and remove
  await rows.first().getByRole('button',{name:/Review/}).click();await expect(page.locator('#approval-results')).toContainText('All caught up');await expect(page.locator('#toast')).toContainText('already been reviewed or withdrawn');
 
 });
+
+test('standard invoice selection limits periods and entries and edits drafts in place', async({page},info)=>{
+ await page.goto('/');await register(page,'Selection reviewer',email('invoice-selection'));
+ await page.evaluate(()=>{
+  state=retainAccounts(seed());const sheet=state.sheets.find(s=>s.id==='s1');
+  sheet.rows=[['select-a','approved',2],['select-b','approved',3],['skip-draft','draft',1],['skip-submitted','submitted',1]].map(([id,status,value])=>({id,contractId:'c1',rate:12500,status,note:id,hours:{[sheet.start]:value}}));refreshSheet(sheet);
+  const maya=state.sheets.find(s=>s.id==='s2');maya.rows[0].status='approved';maya.rows[0].hours={[maya.start]:4};refreshSheet(maya);
+  const older=state.sheets.find(s=>s.id==='old0');older.rows.push({id:'older-unbilled',contractId:'c1',rate:12500,status:'approved',note:'Historical extra work',hours:{[older.start]:1}});save();view='invoices';render();
+ });await saved(page);
+ const periods=await page.evaluate(()=>({current:state.sheets.find(s=>s.id==='s1').start,older:state.sheets.find(s=>s.id==='old0').start}));
+ await page.getByRole('button',{name:'Create invoice',exact:true}).click();
+ await expect(page.locator('#invoice-form [name=sourcePeriod]')).toHaveValue(periods.current);
+ await expect(page.locator('#invoice-entry-list input')).toHaveCount(3);await expect(page.locator('#invoice-preview')).toContainText('9 hours');
+ await page.getByRole('button',{name:'Clear selection',exact:true}).click();await expect(page.getByRole('button',{name:'Create draft',exact:true})).toBeDisabled();
+ await page.locator('#invoice-entry-list input[value="s1|select-a"]').check();await expect(page.locator('#invoice-preview')).toContainText('2 hours');
+ await page.screenshot({path:info.outputPath('invoice-selection-desktop.png'),fullPage:true});
+ await page.setViewportSize({width:390,height:844});await page.screenshot({path:info.outputPath('invoice-selection-mobile.png'),fullPage:true});
+ const modalBounds=await page.getByRole('dialog').boundingBox();expect(modalBounds.x+modalBounds.width).toBeLessThanOrEqual(390);await expect(page.getByRole('button',{name:'Create draft',exact:true})).toBeInViewport();await expect(page.locator('#invoice-footer-summary')).toContainText('$250.00');
+ await page.setViewportSize({width:1280,height:720});
+ await page.getByRole('button',{name:'Create draft',exact:true}).click();await saved(page);
+ const created=await (await page.request.get('/api/workspace')).json(),invoice=created.data.invoices.at(-1);
+ expect(invoice.lines.flatMap(line=>line.sources)).toEqual([{sheetId:'s1',rowId:'select-a'}]);
+ await page.getByRole('button',{name:'Edit draft',exact:true}).click();await expect(page.locator('#invoice-form [name=contract]')).toBeDisabled();
+ await page.locator('#invoice-form [name=note]').fill('Unsaved edit');await page.getByRole('button',{name:'Cancel',exact:true}).click();
+ expect((await (await page.request.get('/api/workspace')).json()).data.invoices.at(-1)).toEqual(invoice);
+ await page.getByRole('button',{name:'Edit draft',exact:true}).click();
+ await page.locator('#invoice-form [name=note]').fill('Corrected invoice note');await page.getByRole('button',{name:'Save draft',exact:true}).click();await saved(page);
+ const noteOnly=(await (await page.request.get('/api/workspace')).json()).data.invoices.at(-1);expect(noteOnly.lines).toEqual(invoice.lines);expect(noteOnly.business).toEqual(invoice.business);
+ await page.getByRole('button',{name:'Edit draft',exact:true}).click();await page.locator('#invoice-form [name=sourcePeriod]').selectOption('all');await expect(page.locator('#invoice-preview')).toContainText('10 hours');
+ await page.getByRole('button',{name:'Clear selection',exact:true}).click();await page.locator('#invoice-entry-list input[value="s1|select-b"]').check();await page.locator('#invoice-entry-list input[value="old0|older-unbilled"]').check();
+ await expect(page.locator('#invoice-preview')).toContainText('4 hours');
+ await page.locator('#invoice-form [name=client]').fill('Corrected client name');await page.locator('#invoice-form [name=email]').fill('corrected@example.test');await page.locator('#invoice-form [name=address]').fill('Corrected billing address');
+ await page.getByRole('button',{name:'Save draft',exact:true}).click();await saved(page);
+ const edited=(await (await page.request.get('/api/workspace')).json()).data.invoices.at(-1);
+ expect(edited.id).toBe(invoice.id);expect(edited.number).toBe(invoice.number);expect(edited.lines.map(line=>line.sources[0].rowId).sort()).toEqual(['older-unbilled','select-b']);expect(edited.address).toBe('Corrected billing address');
+ await page.getByRole('button',{name:/^Mark sent/}).click();await page.getByRole('button',{name:'Mark sent',exact:true}).click();await saved(page);await expect(page.getByRole('button',{name:'Edit draft',exact:true})).toHaveCount(0);
+ await page.getByRole('button',{name:'Close dialog'}).click();await page.getByRole('button',{name:'Create invoice',exact:true}).click();await expect(page.locator('#invoice-preview')).toContainText('6 hours');await expect(page.locator('#invoice-entry-list input')).toHaveCount(2);
+ await page.getByRole('button',{name:'Cancel',exact:true}).click();await page.reload();await expect(page.getByRole('navigation')).toBeVisible();
+ const persisted=(await (await page.request.get('/api/workspace')).json()).data.invoices.find(i=>i.id===invoice.id);expect(persisted.lines).toEqual(edited.lines);expect(persisted.client).toBe('Corrected client name');
+});

@@ -29,3 +29,11 @@ Existing timesheets need no migration. Feedback is an optional append-only row f
 Admins can open Approvals to find submitted rows across all timesheet periods, including mixed-status sheets and inactive employees. Entries are ordered by period (oldest first), and show submitted hours only, rather than the full timesheet total. Search by employee or period; Review refreshes the workspace and opens the exact employee and period. Back to approvals returns to the queue. Approval, return for changes, or employee withdrawal removes the corresponding submitted rows from the queue. Refresh approvals fetches current workspace data.
 
 The waiting age uses server-recorded submission events for the currently submitted rows. New row submissions do not reset the age of older rows still waiting on the same timesheet. Missing dates on older records or restored submissions display Not recorded; no historical timestamp is invented. This adds row IDs to new submission audit events without a database migration. The queue is admin-only and stays within the active workspace. On mobile, each entry displays as a card with its Review action visible.
+
+## Select standard invoice entries and edit drafts
+
+Create invoice opens on the most recent period with eligible approved rows. Select a Billing period, or choose All available periods to select across periods. Check the entries to include; each shows the employee, period, hours, amount, and work note. Only checked rows are billed. Changing the period resets the selection to that period; Clear selection starts over. The selected total stays visible beside Create draft. Unchecked entries remain available for later invoices, and active invoice sources cannot be selected again.
+
+On an unsent standard invoice, Edit draft can change its selected entries, invoice and due dates, bill-to name/email/address, and invoice note. Cancel discards the edit. Saving retains the invoice ID, number, original business details, and unchanged source lines. Removing an entry releases it for later billing. Sent and voided invoices remain locked; use the correction workflow instead. Government invoices retain their monthly task-order workflow and frozen snapshots; unsent government drafts can still be deleted and recreated.
+
+No database migration or new invoice data fields are required for entry selection or standard draft editing.

@@ -512,3 +512,18 @@ test('approval queue includes mixed and older sheets, isolates workspaces and pr
  appendSubmission('new-pending',newDate,true);
  assert.equal((await queue())[0].submittedAt,null);
 });
+
+test('standard drafts accept selected approved sources and edits without double billing or editing sent records', async t=>{
+ const {app,admin}=await setupShared(t);let doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body;
+ doc.data.sheets=['2026-09-01','2026-10-01'].map((start,index)=>({id:'select-sheet-'+index,employeeId:'worker',start,status:'approved',rows:[{id:'select-row-'+index,contractId:'assigned',rate:12500,status:'approved',note:'Work '+index,hours:{[start]:index+1}}]}));
+ const line=index=>({sources:[{sheetId:'select-sheet-'+index,rowId:'select-row-'+index}],description:'Selected work',employee:'Worker',start:doc.data.sheets[index].start,end:index?'2026-10-15':'2026-09-15',hours:index+1,rate:12500,amount:(index+1)*12500});
+ const draft={id:'selected-draft',number:'SEL-1',contractId:'assigned',client:'Client A',contract:'Assigned work',email:'',address:'',business:{...doc.data.settings},issued:'2026-10-01',due:'2026-10-31',sentDate:null,payments:[],lines:[line(1)],note:''};doc.data.invoices.push(draft);
+ const save=data=>app.request('/api/workspace',{method:'PUT',cookie:admin.cookie,data:{data,revision:doc.revision}}),reload=async()=>{doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body};
+ assert.equal((await save(doc.data)).status,200);await reload();
+ let duplicate=structuredClone(doc.data);duplicate.invoices.push({...structuredClone(draft),id:'duplicate',number:'SEL-2'});assert.equal((await save(duplicate)).status,400);
+ doc.data.invoices[0].lines=[line(0)];doc.data.invoices[0].note='Updated draft';doc.data.invoices[0].address='Corrected address';assert.equal((await save(doc.data)).status,200);await reload();
+ assert.equal(doc.data.invoices[0].number,'SEL-1');assert.equal(doc.data.invoices[0].id,'selected-draft');
+ doc.data.invoices.push({...structuredClone(draft),id:'other-draft',number:'SEL-2'});assert.equal((await save(doc.data)).status,200);await reload();
+ doc.data.invoices[0].sentDate='2026-10-02';assert.equal((await save(doc.data)).status,200);await reload();
+ doc.data.invoices[0].note='Cannot change sent invoice';assert.equal((await save(doc.data)).status,409);
+});
