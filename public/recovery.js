@@ -48,3 +48,26 @@ function offerRowUndo(original,row,index){
 async function replaceWorkspace(data,nextView,message){
  try{await saveQueue;if(saveFailure)throw Error('Resolve unsaved changes before replacing the workspace.');await api('/api/workspace/import',{method:'POST',body:JSON.stringify({data,revision})});await loadWorkspace();view=nextView;render();toast(message)}catch(error){toast(error.message)}
 }
+
+
+let feedbackReturn=null;
+function rowFeedback(row){
+ const history=row.feedback||[];if(!history.length)return '';
+ return `<section class="row-feedback" role="note" aria-label="Reviewer feedback"><strong>${row.status==='draft'?'Changes requested':row.status==='submitted'?'Resubmitted · reviewer feedback':'Reviewer feedback history'}</strong><p>${esc(history.at(-1))}</p>${history.length>1?`<details><summary>Earlier feedback (${history.length-1})</summary>${history.slice(0,-1).map(reason=>`<p>${esc(reason)}</p>`).join('')}</details>`:''}</section>`;
+}
+function returnWithFeedback(rowIds){
+ const sheet=currentSheet();if(!isOwner()||!sheet||!employee(sheet.employeeId).active||!rowIds.length)return;
+ const rows=sheet.rows.filter(row=>rowIds.includes(row.id));
+ if(rows.length!==rowIds.length||rows.some(row=>!['approved','submitted'].includes(row.status)||billed(sheet,row)))return;
+ feedbackReturn={sheetId:sheet.id,rows:rows.map(row=>({id:row.id,status:row.status}))};
+ showModal('Return hours for changes',`<form id="feedback-form" onsubmit="event.preventDefault();saveReturnFeedback(this)"><div id="form-error"></div><p class="note">${rows.length===1?'Only this row will return to draft.':`These ${rows.length} rows will return to draft with the same feedback.`} Hours and work notes will be kept. Resubmission and approval are required before invoicing.</p><ul>${rows.map(row=>`<li>${esc(contract(row.contractId).name)} · ${hours(rowHours(row))} hours</li>`).join('')}</ul><label>What needs to change?<textarea name="reason" maxlength="500" required placeholder="For example: Move Tuesday’s 2 hours to the correct project and explain the work performed."></textarea></label><small>The employee will see this beside each affected row. Earlier feedback stays in history.</small></form>`,`<button onclick="closeModal()">Cancel</button><button class="primary" type="submit" form="feedback-form">Return to draft</button>`);
+}
+function saveReturnFeedback(form){
+ if(!isOwner()||!feedbackReturn)return;
+ const reason=new FormData(form).get('reason').trim();if(!reason)return formError('Explain what needs to change.');
+ const sheet=state.sheets.find(s=>s.id===feedbackReturn.sheetId),rows=feedbackReturn.rows.map(old=>sheet?.rows.find(row=>row.id===old.id&&row.status===old.status));
+ if(!sheet||!employee(sheet.employeeId).active||rows.some(row=>!row||billed(sheet,row)))return formError('These rows changed. Close this dialog and review the latest timesheet.');
+ if(rows.some(row=>(row.feedback||[]).length>=100))return formError('This row has reached its feedback history limit. Keep it for history and create a new row.');
+ for(const row of rows){row.feedback=[...(row.feedback||[]),reason];row.status='draft'}
+ refreshSheet(sheet);feedbackReturn=null;save();closeModal();render();toast('Hours returned with correction feedback');
+}

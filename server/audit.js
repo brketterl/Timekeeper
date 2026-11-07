@@ -5,7 +5,7 @@ export function auditStore(db, { onEvent = () => {} } = {}) {
   function record(workspaceId, userId, type, entityId, summary, details = {}) {
     const actor = db.prepare(`SELECT u.name, m.role FROM users u LEFT JOIN memberships m ON m.user_id=u.id AND m.workspace_id=? WHERE u.id=?`).get(workspaceId, userId);
     if (!actor?.role) throw Error('An audit actor must belong to the workspace.');
-    const safeDetails = Object.fromEntries(Object.entries(details).map(([key, value]) => [key, typeof value === 'string' ? value.slice(0, 200) : value]));
+    const safeDetails = Object.fromEntries(Object.entries(details).map(([key, value]) => [key, typeof value === 'string' ? value.slice(0, key==='reason'?500:200) : value]));
     const inserted = db.prepare(`INSERT INTO audit_events(workspace_id,actor_id,actor_name,actor_role,event_type,entity_id,summary,details,created_at)
       VALUES(?,?,?,?,?,?,?,?,?)`).run(workspaceId, userId, actor.name, actor.role, type, entityId, summary.slice(0, 500), JSON.stringify(safeDetails), Date.now());
     onEvent({ id: Number(inserted.lastInsertRowid), workspaceId, actorId: userId, type, entityId, details: safeDetails });
@@ -18,6 +18,7 @@ export function auditStore(db, { onEvent = () => {} } = {}) {
       const transitions = new Map(); let edited = 0;
       for (const row of sheet.rows) {
         const previous = old?.rows.find(r => r.id === row.id);
+        if(previous&&(row.feedback||[]).length>(previous.feedback||[]).length)log('timesheet.feedback_added',sheet.id,`Returned hours for ${who} with correction feedback`,{employeeId:sheet.employeeId,period:sheet.start,rowId:row.id,reason:row.feedback.at(-1)});
         if (previous?.status !== row.status) {
           const action = row.status === 'submitted' ? 'submitted' : row.status === 'approved' ? 'approved' : previous?.status === 'submitted' ? 'withdrawn' : previous?.status === 'approved' ? 'reopened' : null;
           if (action) transitions.set(action, (transitions.get(action) || 0) + 1);
@@ -25,7 +26,7 @@ export function auditStore(db, { onEvent = () => {} } = {}) {
       }
       for (const [action, count] of transitions) log(`timesheet.${action}`, sheet.id, `${action[0].toUpperCase() + action.slice(1)} hours for ${who}`, { employeeId: sheet.employeeId, period: sheet.start, rows: count });
       const removed = old?.rows.filter(row => !sheet.rows.some(r => r.id === row.id)).length || 0;
-      if (removed) log('timesheet.rows_removed', sheet.id, `Removed time entries for ${who}`, { employeeId: sheet.employeeId, period: sheet.start, rows: removed });
+      if (removed) log('timesheet.rows_removed', sheet.id, `Removed time entries for ${who}`, { employeeId: sheet.employeeId, period: sheet.start, rows: removed, feedbackRows: old.rows.filter(row=>row.feedback?.length&&!sheet.rows.some(r=>r.id===row.id)).map(row=>({id:row.id,feedback:row.feedback})) });
       if (edited) log('timesheet.updated', sheet.id, `Updated locked or submitted hours for ${who}`, { employeeId: sheet.employeeId, period: sheet.start, rows: edited });
     }
     for (const old of before.sheets) if (!after.sheets.some(s => s.id === old.id)) log('timesheet.deleted', old.id, 'Removed timesheet', { employeeId: old.employeeId, period: old.start });

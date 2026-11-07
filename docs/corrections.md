@@ -15,3 +15,11 @@ Workspace backup restore, Start an empty workspace, and Reload sample workspace 
 ## Release and rollback
 
 No SQLite schema migration is required. Voids and reversals add optional fields to the existing workspace JSON. Older code does not understand those fields and may calculate incorrect balances or reject backups after corrected payments. After using these actions, rolling back to an older application version requires a compatible fix or restoring a verified backup from before the corrections (which loses later writes). Keep a restorable production backup before releasing and do not deploy older code against corrected data.
+
+## Return hours with feedback
+
+An admin returning submitted hours or reopening approved, uninvoiced hours must enter a correction reason (up to 500 characters). The dialog lists the affected rows; a bulk return applies the same reason to each listed row. Existing draft rows and invoiced rows are unaffected.
+
+Employees see the latest reason beside the affected row. Earlier feedback remains available under Earlier feedback. Work notes remain separate and editable while the row is draft. Reviewer feedback remains visible through resubmission and approval; employees cannot edit the reviewer feedback field. Deleting an entire draft row removes it from the timesheet display; the original reviewer feedback remains in admin Activity. Activity records each reason with the server-derived reviewer identity and timestamp. These actions do not add return-for-changes emails; existing submission and approval emails continue unchanged.
+
+Existing timesheets need no migration. Feedback is an optional append-only row field preserved in workspace exports and restores. Older clients that do not understand feedback must be upgraded before editing affected records.

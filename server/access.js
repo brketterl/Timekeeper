@@ -7,13 +7,21 @@ import { validBackup } from './validation.js';
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const digest = value => createHash('sha256').update(value).digest('hex');
 const roles = ['admin', 'employee'];
-const rowView = r => ({ id: r.id, contractId: r.contractId, status: r.status, hours: r.hours, note: r.note, ...(r.taskOrderId ? { taskOrderId: r.taskOrderId, laborCategory: r.laborCategory } : {}) });
+const rowView = r => ({ id: r.id, contractId: r.contractId, status: r.status, hours: r.hours, note: r.note, ...(r.feedback ? { feedback: r.feedback } : {}), ...(r.taskOrderId ? { taskOrderId: r.taskOrderId, laborCategory: r.laborCategory } : {}) });
 const sheetView = s => ({ id: s.id, employeeId: s.employeeId, start: s.start, status: s.status, rows: s.rows.map(rowView) });
 const equal = isDeepStrictEqual;
 
 export function accessStore(db, { onAuditEvent, notificationStatus, retryNotifications } = {}) {
   const audit = auditStore(db, { onEvent: onAuditEvent });
   const log = (session, type, id, summary, details) => audit.record(session.workspace_id, session.user_id, type, id, summary, details);
+  const removedFeedback=(session,sheet,row)=>{
+    if(!row.feedback?.length)return [];
+    const event=db.prepare(`SELECT details FROM audit_events WHERE workspace_id=? AND entity_id=? AND event_type='timesheet.rows_removed'
+      AND json_extract(details,'$.employeeId')=? AND EXISTS(SELECT 1 FROM json_each(details,'$.feedbackRows') WHERE json_extract(value,'$.id')=?) ORDER BY id DESC LIMIT 1`)
+      .get(session.workspace_id,sheet.id,sheet.employeeId,row.id);
+    return event?JSON.parse(event.details).feedbackRows.find(r=>r.id===row.id).feedback:[];
+  };
+
   const document = workspaceId => {
     const row = db.prepare('SELECT data, revision FROM workspace_documents WHERE workspace_id = ?').get(workspaceId);
     return { data: JSON.parse(row.data), revision: row.revision };
@@ -100,6 +108,10 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       if(!restore&&input.data.invoices.some(i=>i.voided&&!before.invoices.some(old=>old.id===i.id)))throw fail(400,'Record and send an invoice before voiding it.');
       if(!restore&&input.data.invoices.some(i=>i.government&&!before.invoices.some(old=>old.id===i.id))) throw fail(400,'Create government invoices using the monthly billing action.');
       for(const sheet of restore ? [] : input.data.sheets) for(const row of sheet.rows) {
+        const previous=before.sheets.find(s=>s.id===sheet.id)?.rows.find(r=>r.id===row.id),history=previous?.feedback||(!previous?removedFeedback(session,sheet,row):[]),feedback=row.feedback||[];
+        const returned=previous&&['submitted','approved'].includes(previous.status)&&row.status==='draft';
+        if(!equal(feedback.slice(0,history.length),history)||feedback.length!==history.length+(returned?1:0))throw fail(409,returned?'Add one correction reason when returning hours to draft.':'Reviewer feedback history cannot be changed.');
+
         const c=input.data.contracts.find(c=>c.id===row.contractId);
         if(!isGovernment(c)) continue;
         const old=before.sheets.find(s=>s.id===sheet.id)?.rows.find(r=>r.id===row.id);
@@ -128,8 +140,9 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
         if (old && old.start !== s.start) throw fail(403, 'Timesheet dates cannot be changed.');
         if (old?.rows.some(r => r.status !== 'draft' && !s.rows.some(row => row.id === r.id))) throw fail(403, 'Locked rows cannot be removed.');
         const rows = s.rows.map(r => {
-          if (!r || Object.keys(r).some(k => !['id', 'contractId', 'status', 'hours', 'note', 'taskOrderId', 'laborCategory'].includes(k))) throw fail(400, 'Invalid time entry fields.');
+          if (!r || Object.keys(r).some(k => !['id', 'contractId', 'status', 'hours', 'note', 'taskOrderId', 'laborCategory', 'feedback'].includes(k))) throw fail(400, 'Invalid time entry fields.');
           const previous = old?.rows.find(x => x.id === r.id);
+          if(!equal(previous?.feedback||(!previous?removedFeedback(session,s,r):[]),r.feedback||[]))throw fail(403,'Only admins can add reviewer feedback; existing feedback must be kept.');
           if (previous?.status === 'approved') {
             if (!equal(rowView(previous), r)) throw fail(403, 'Approved hours are locked.');
             return previous;

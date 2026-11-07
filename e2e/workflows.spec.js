@@ -25,7 +25,7 @@ async function invite(page, address, role) {
   return page.locator('#invite-result input').inputValue();
 }
 
-test('employee invitation, restricted time entry, approval, and shared partner access', async ({ page, browser }) => {
+test('employee invitation, restricted time entry, approval, and shared partner access', async ({ page, browser }, info) => {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('/');
@@ -86,6 +86,35 @@ test('employee invitation, restricted time entry, approval, and shared partner a
 
   await page.reload();
   await page.getByRole('button', { name: 'Review', exact: true }).click();
+  await page.getByRole('button', { name: 'Return row for changes', exact: true }).click();
+  await page.getByLabel('What needs to change?', { exact: true }).fill('   ');
+  await page.getByRole('button', { name: 'Return to draft', exact: true }).click();
+  await expect(page.locator('#form-error')).toContainText('Explain what needs to change.');
+  await page.getByLabel('What needs to change?', { exact: true }).fill('Explain the work performed on the report.');
+  await page.getByRole('button', { name: 'Return to draft', exact: true }).click();
+  await saved(page);
+  await worker.reload();
+  await expect(worker.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Explain the work performed on the report.');
+  await worker.screenshot({ path: info.outputPath('employee-feedback.png'), fullPage: true });
+  await worker.setViewportSize({ width: 390, height: 844 });
+  await worker.screenshot({ path: info.outputPath('employee-feedback-mobile.png'), fullPage: true });
+  const feedbackBounds=await worker.getByRole('note', { name: 'Reviewer feedback' }).boundingBox();
+  expect(feedbackBounds.x+feedbackBounds.width).toBeLessThanOrEqual(390);
+  await worker.setViewportSize({ width: 1280, height: 720 });
+  await worker.getByRole('button', { name: 'Remove Shared project row', exact: true }).click();
+  await worker.getByRole('button', { name: 'Confirm', exact: true }).click();await saved(worker);
+  await worker.getByRole('button', { name: 'Undo', exact: true }).click();await saved(worker);
+  await expect(worker.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Explain the work performed on the report.');
+  await worker.getByRole('button', { name: 'Add note', exact: true }).click();
+  await worker.locator('#row-note').fill('Prepared the weekly progress report.');
+  await worker.getByRole('button', { name: 'Save note', exact: true }).click();
+  await saved(worker);
+  await worker.getByRole('button', { name: 'Submit draft hours', exact: true }).click();
+  await saved(worker);
+  await expect(worker.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Resubmitted');
+  await page.reload();
+  await page.getByRole('button', { name: 'Review', exact: true }).click();
+  await expect(page.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Explain the work performed on the report.');
   await page.getByRole('button', { name: 'Approve submitted hours', exact: true }).click();
   await saved(page);
   await expect.poll(async () => (await inboxEmails(worker, workerEmail)).filter(email => email.subject.includes('hours were approved')).length).toBe(1);
@@ -93,6 +122,7 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await expect(worker.locator('input[type=number]').first()).toBeDisabled();
   await expect(worker.getByRole('button', { name: 'Reopen row', exact: true })).toHaveCount(0);
   await expect(worker.getByText('Ask an admin to reopen this row for corrections.', { exact: true })).toBeVisible();
+  await expect(worker.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Reviewer feedback history');
 
   const partnerEmail = email('partner');
   const partnerContext = await browser.newContext();
@@ -108,6 +138,12 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await page.reload();
   await page.locator('nav button[title=Settings]').click();
   await expect(page.locator('input[name=business]')).toHaveValue('Shared test business');
+  await page.locator('nav button[title=Activity]').click();
+  const removedFeedback=page.locator('#activity-list article').filter({hasText:'Feedback from removed rows'});
+  await removedFeedback.getByText('Feedback from removed rows', {exact:true}).click();
+  await expect(removedFeedback).toContainText('Explain the work performed on the report.');
+  await expect(page.locator('#activity-list article').filter({hasText:'Returned hours for'}).first()).toContainText('Explain the work performed on the report.');
+
   expect(errors).toEqual([]);
   await workerContext.close(); await partnerContext.close();
 });
@@ -331,8 +367,16 @@ test('mixed timesheet statuses remain visible and actions only change their stat
   await saved(page);
   await expect(summary).toHaveText('1 awaiting approval2 approved');
   await page.getByRole('button', { name: 'Return submitted hours for changes', exact: true }).click();
+  await page.getByLabel('What needs to change?', { exact: true }).fill('Confirm the project assignment.');
+  await page.getByRole('button', { name: 'Return to draft', exact: true }).click();
   await saved(page);
   await expect(summary).toHaveText('1 draft2 approved');
+  await page.getByRole('button', { name: 'Submit draft hours', exact: true }).click();await saved(page);
+  await page.getByRole('button', { name: 'Return submitted hours for changes', exact: true }).click();
+  await page.getByLabel('What needs to change?', { exact: true }).fill('Also check the work date.');
+  await page.getByRole('button', { name: 'Return to draft', exact: true }).click();await saved(page);
+  await rows.nth(2).getByText('Earlier feedback (1)', { exact: true }).click();
+  await expect(rows.nth(2).getByRole('note', { name: 'Reviewer feedback' })).toContainText('Confirm the project assignment.');
   await page.reload();
   const persisted = await (await page.request.get('/api/workspace')).json();
   expect(persisted.data.sheets.find(s => s.id === 's1').rows.map(r => r.status)).toEqual(['approved', 'approved', 'draft']);
@@ -367,7 +411,8 @@ test('row corrections preserve neighboring and invoiced hours on a mixed timeshe
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(rows.nth(1).locator('.badge')).toHaveText('Approved');
   await rows.nth(1).getByRole('button', { name: 'Reopen row', exact: true }).click();
-  await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await page.getByLabel('What needs to change?', { exact: true }).fill('Correct the work date.');
+  await page.getByRole('button', { name: 'Return to draft', exact: true }).click();
   await saved(page);
   await expect(rows.nth(1).locator('input').first()).toBeEnabled();
   await expect(rows.nth(2).locator('.badge')).toHaveText('Approved');
@@ -376,7 +421,8 @@ test('row corrections preserve neighboring and invoiced hours on a mixed timeshe
   await expect(page.locator('#row-note')).toHaveValue('Keep this work note 0');
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await rows.nth(3).getByRole('button', { name: 'Return row for changes', exact: true }).click();
-  await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await page.getByLabel('What needs to change?', { exact: true }).fill('Add the missing work description.');
+  await page.getByRole('button', { name: 'Return to draft', exact: true }).click();
   await saved(page);
   await expect(rows.nth(3).locator('.badge')).toHaveText('Draft');
   await expect(rows.nth(2).locator('.badge')).toHaveText('Approved');

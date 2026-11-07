@@ -442,7 +442,7 @@ test('invoice voids and payment reversals retain immutable records and release b
   doc.data.invoices[0].payments[1].reversed={date:'2026-11-01',reason:'Invoice duplicated'};assert.equal((await save(doc.data)).status,200);await reload();
   doc.data.invoices[0].voided={date:'2026-11-01',reason:'Duplicate invoice'};assert.equal((await save(doc.data)).status,200);await reload();
   copy=structuredClone(doc.data);delete copy.invoices[0].voided;assert.equal((await save(copy)).status,409);
-  doc.data.sheets[0].rows[0].status=doc.data.sheets[0].status='draft';assert.equal((await save(doc.data)).status,200);await reload();
+  doc.data.sheets[0].rows[0].status=doc.data.sheets[0].status='draft';doc.data.sheets[0].rows[0].feedback=['Correct hours after voiding invoice'];assert.equal((await save(doc.data)).status,200);await reload();
   assert.equal(doc.data.invoices[0].lines[0].amount,100000);assert.equal(doc.data.invoices[0].payments.length,2);
   const activity=(await app.request('/api/activity',{cookie:admin.cookie})).body;
   assert.ok(activity.events.some(e=>e.type==='invoice.voided'));assert.ok(activity.events.some(e=>e.type==='payment.reversed'));
@@ -456,4 +456,30 @@ test('employees can delete their own empty timesheet without deleting other reco
   doc=(await app.request('/api/workspace',{cookie:worker.cookie})).body;
   assert.equal((await app.request('/api/employee/timesheets',{method:'PUT',cookie:worker.cookie,data:{sheets:[],revision:doc.revision}})).status,200);
   assert.equal((await app.request('/api/workspace',{cookie:admin.cookie})).body.data.employees.length,2);
+});
+
+test('reviewer feedback survives employee correction and resubmission and cannot be forged or erased', async t=>{
+ const {app,admin,worker}=await setupShared(t);
+ let doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body;
+ const sheet={id:'feedback-sheet',employeeId:'worker',start:'2026-10-01',status:'submitted',rows:[{id:'feedback-row',contractId:'assigned',rate:12500,status:'submitted',hours:{'2026-10-01':8},note:'Original work'}]};doc.data.sheets.push(sheet);
+ const adminSave=data=>app.request('/api/workspace',{method:'PUT',cookie:admin.cookie,data:{data,revision:doc.revision}});
+ const reload=async()=>{doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body};
+ assert.equal((await adminSave(doc.data)).status,200);await reload();
+ let changed=structuredClone(doc.data);changed.sheets[0].status=changed.sheets[0].rows[0].status='draft';
+ assert.equal((await adminSave(changed)).status,409);
+ changed.sheets[0].rows[0].feedback=['Please clarify Tuesday’s work.'];assert.equal((await adminSave(changed)).status,200);await reload();
+ changed=structuredClone(doc.data);changed.sheets[0].rows[0].feedback=['Edited history'];assert.equal((await adminSave(changed)).status,409);
+ let own=(await app.request('/api/workspace',{cookie:worker.cookie})).body;
+ const workerSave=sheets=>app.request('/api/employee/timesheets',{method:'PUT',cookie:worker.cookie,data:{sheets,revision:own.revision}});
+ assert.deepEqual(own.data.sheets[0].rows[0].feedback,['Please clarify Tuesday’s work.']);
+ let forged=structuredClone(own.data.sheets);forged[0].rows[0].feedback=[];assert.equal((await workerSave(forged)).status,403);
+ forged=structuredClone(own.data.sheets);forged[0].rows[0].feedback.push('Forged admin note');assert.equal((await workerSave(forged)).status,403);
+ own.data.sheets[0].rows[0].note='Tuesday: prepared the weekly report.';own.data.sheets[0].status=own.data.sheets[0].rows[0].status='submitted';
+ assert.equal((await workerSave(own.data.sheets)).status,200);await reload();
+ assert.deepEqual(doc.data.sheets[0].rows[0].feedback,['Please clarify Tuesday’s work.']);
+ changed=structuredClone(doc.data);changed.sheets[0].status=changed.sheets[0].rows[0].status='draft';changed.sheets[0].rows[0].feedback.push('Also confirm the project code.');
+ assert.equal((await adminSave(changed)).status,200);await reload();
+ assert.equal(doc.data.sheets[0].rows[0].feedback.length,2);
+ const activity=(await app.request('/api/activity',{cookie:admin.cookie})).body.events.filter(e=>e.type==='timesheet.feedback_added');
+ assert.equal(activity.length,2);assert.equal(activity[0].actorId,admin.body.user.id);assert.equal(activity[0].details.reason,'Also confirm the project code.');
 });
