@@ -75,6 +75,14 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await expect(worker.getByRole('group', { name: 'Timesheet status by row' })).toHaveText('1 awaiting approval');
   await expect(worker.getByRole('button', { name: 'Withdraw submitted hours', exact: true })).toBeVisible();
   await expect.poll(async () => (await inboxEmails(page, adminEmail)).filter(email => email.subject.includes('submitted for review')).length).toBe(1);
+  await worker.getByRole('button', { name: 'Withdraw row', exact: true }).click();
+  await worker.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await saved(worker);
+  await expect(worker.locator('.time-table tbody tr').first().locator('.badge')).toHaveText('Draft');
+  await expect(worker.locator('input[type=number]').first()).toBeEnabled();
+  await worker.getByRole('button', { name: 'Submit draft hours', exact: true }).click();
+  await saved(worker);
+
 
   await page.reload();
   await page.getByRole('button', { name: 'Review', exact: true }).click();
@@ -83,6 +91,8 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await expect.poll(async () => (await inboxEmails(worker, workerEmail)).filter(email => email.subject.includes('hours were approved')).length).toBe(1);
   await worker.reload();
   await expect(worker.locator('input[type=number]').first()).toBeDisabled();
+  await expect(worker.getByRole('button', { name: 'Reopen row', exact: true })).toHaveCount(0);
+  await expect(worker.getByText('Ask an admin to reopen this row for corrections.', { exact: true })).toBeVisible();
 
   const partnerEmail = email('partner');
   const partnerContext = await browser.newContext();
@@ -330,4 +340,56 @@ test('mixed timesheet statuses remain visible and actions only change their stat
   await expect(page.getByRole('group', { name: 'Timesheet status by row' })).toHaveCount(0);
   await expect(page.locator('.timesheet-heading')).toContainText('Not started');
   await expect(page.getByRole('button', { name: 'Submit draft hours', exact: true })).toBeDisabled();
+});
+
+
+test('row corrections preserve neighboring and invoiced hours on a mixed timesheet', async ({ page }, info) => {
+  await page.goto('/');
+  await register(page, 'Correction reviewer', email('corrections'));
+  await page.evaluate(() => {
+    state = retainAccounts(seed());
+    const sheet = state.sheets.find(s => s.id === 'old0');
+    sheet.rows.push(...['approved', 'approved', 'submitted', 'draft'].map((status,index) => ({
+      id: 'correction-' + index, contractId: 'c1', rate: 12500, status,
+      note: 'Keep this work note ' + index, hours: { [sheet.start]: 1 }
+    })));
+    refreshSheet(sheet); save(); openSheet(sheet.employeeId,sheet.start);
+  });
+  await saved(page);
+  const rows = page.locator('.time-table tbody tr');
+  await expect(rows.nth(0)).toContainText('Locked on INV-1001');
+  await expect(rows.nth(0).getByRole('button', { name: 'Reopen row', exact: true })).toHaveCount(0);
+  await rows.nth(0).getByRole('button', { name: 'View invoice', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('INV-1001');
+  await page.getByRole('button', { name: 'Close dialog' }).click();
+  await rows.nth(1).getByRole('button', { name: 'Reopen row', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('Only this row will return to draft');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(rows.nth(1).locator('.badge')).toHaveText('Approved');
+  await rows.nth(1).getByRole('button', { name: 'Reopen row', exact: true }).click();
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await saved(page);
+  await expect(rows.nth(1).locator('input').first()).toBeEnabled();
+  await expect(rows.nth(2).locator('.badge')).toHaveText('Approved');
+  await expect(rows.nth(3).locator('.badge')).toHaveText('Awaiting approval');
+  await rows.nth(1).getByRole('button', { name: 'View note', exact: true }).click();
+  await expect(page.locator('#row-note')).toHaveValue('Keep this work note 0');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await rows.nth(3).getByRole('button', { name: 'Return row for changes', exact: true }).click();
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await saved(page);
+  await expect(rows.nth(3).locator('.badge')).toHaveText('Draft');
+  await expect(rows.nth(2).locator('.badge')).toHaveText('Approved');
+  await page.screenshot({ path: info.outputPath('row-corrections.png'), fullPage: true });
+  const doc = await (await page.request.get('/api/workspace')).json();
+  const sheet = doc.data.sheets.find(s => s.id === 'old0');
+  expect(sheet.rows.map(r => r.status)).toEqual(['approved','draft','approved','draft','draft']);
+  expect(sheet.rows[1].hours[sheet.start]).toBe(1);
+  sheet.rows[0].status = 'draft';
+  const forged = await page.request.put('/api/workspace', { headers: { Origin: 'http://127.0.0.1:3100' }, data: { data: doc.data, revision: doc.revision } });
+  expect(forged.status()).toBe(400);
+  await page.reload();
+  await expect(page.getByRole('navigation')).toBeVisible();
+  const persisted = await (await page.request.get('/api/workspace')).json();
+  expect(persisted.data.sheets.find(s => s.id === 'old0').rows.map(r => r.status)).toEqual(['approved','draft','approved','draft','draft']);
 });

@@ -189,6 +189,7 @@ test('employees edit own draft hours, submit/withdraw, and cannot forge approval
   assert.equal((await app.request('/api/workspace', { method: 'PUT', cookie: admin.cookie, data: { data: full.data, revision: full.revision } })).status, 200);
   doc = (await app.request('/api/workspace', { cookie: worker.cookie })).body;
   const locked = doc.data.sheets[0];
+  assert.equal((await save([{ ...locked, status: 'draft', rows: [{ ...locked.rows[0], status: 'draft' }] }])).status, 403);
   assert.equal((await save([{ ...locked, rows: [{ ...locked.rows[0], hours: { '2026-10-01': 1 } }] }])).status, 403);
   assert.equal((await save([{ ...locked, status: 'draft', rows: [] }])).status, 403);
   assert.equal((await save([locked])).status, 200);
