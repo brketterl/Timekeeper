@@ -70,8 +70,10 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await worker.locator('input[type=number]').first().fill('8');
   await worker.locator('input[type=number]').first().press('Tab');
   await saved(worker);
-  await worker.getByRole('button', { name: 'Submit timesheet' }).click();
+  await worker.getByRole('button', { name: 'Submit draft hours' }).click();
   await saved(worker);
+  await expect(worker.getByRole('group', { name: 'Timesheet status by row' })).toHaveText('1 awaiting approval');
+  await expect(worker.getByRole('button', { name: 'Withdraw submitted hours', exact: true })).toBeVisible();
   await expect.poll(async () => (await inboxEmails(page, adminEmail)).filter(email => email.subject.includes('submitted for review')).length).toBe(1);
 
   await page.reload();
@@ -269,11 +271,63 @@ test('government invoice setup creates a highlighted monthly PDF with locked cum
   future.data.invoices[0].issued='2099-11-01';future.data.invoices[0].due='2099-12-01';
   const restored=await page.request.post('/api/workspace/import',{headers:{Origin:'http://127.0.0.1:3100'},data:{data:future.data,revision:future.revision}});
   expect(restored.status()).toBe(200);
-  await page.reload();await page.evaluate(()=>invoiceDetail(state.invoices[0].id));
+  await page.reload();
+  await expect(page.getByRole('navigation')).toBeVisible();
+  await page.evaluate(()=>invoiceDetail(state.invoices[0].id));
   await page.getByRole('button',{name:/^Mark sent/}).click();
   await page.locator('#send-form [name=date]').fill('2026-10-28');
   await page.getByRole('button',{name:'Mark sent',exact:true}).click();await saved(page);
   const sent=await (await page.request.get('/api/workspace')).json();
   expect(sent.data.invoices[0].sentDate).toBe('2026-10-28');
 
+});
+
+
+test('mixed timesheet statuses remain visible and actions only change their stated rows', async ({ page }, info) => {
+  await page.goto('/');
+  await register(page, 'Status reviewer', email('statuses'));
+  // Fixture lives only in the temporary e2e workspace, with the linked account retained.
+  await page.evaluate(() => {
+    state = retainAccounts(seed());
+    const sheet = state.sheets.find(s => s.id === 's1');
+    sheet.rows = ['approved', 'submitted', 'draft'].map((status, index) => ({
+      id: 'mixed-row-' + index, contractId: index === 1 ? 'c2' : 'c1',
+      rate: index === 1 ? 8500 : 12500, note: '', status, hours: { [sheet.start]: index + 1 }
+    }));
+    refreshSheet(sheet); save(); render();
+  });
+  await saved(page);
+  const overviewRow = page.locator('tbody tr').filter({ has: page.getByText('You', { exact: true }) });
+  await expect(overviewRow.getByRole('group', { name: 'Timesheet status by row' })).toHaveText('1 draft1 awaiting approval1 approved');
+  await overviewRow.getByRole('button', { name: 'Review', exact: true }).click();
+  const summary = page.getByRole('group', { name: 'Timesheet status by row' });
+  const rows = page.locator('.time-table tbody tr');
+  await page.screenshot({ path: info.outputPath('mixed-status-desktop.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: info.outputPath('mixed-status-mobile.png'), fullPage: true });
+  const bounds = await summary.boundingBox();
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await expect(rows.nth(0).locator('.badge')).toHaveText('Approved');
+  await expect(rows.nth(1).locator('.badge')).toHaveText('Awaiting approval');
+  await expect(rows.nth(2).locator('.badge')).toHaveText('Draft');
+  await expect(rows.nth(0).locator('input').first()).toBeDisabled();
+  await expect(rows.nth(2).locator('input').first()).toBeEnabled();
+  await page.getByRole('button', { name: 'Approve submitted hours', exact: true }).click();
+  await saved(page);
+  await expect(summary).toHaveText('1 draft2 approved');
+  await expect(rows.nth(2).locator('.badge')).toHaveText('Draft');
+  await page.getByRole('button', { name: 'Submit draft hours', exact: true }).click();
+  await saved(page);
+  await expect(summary).toHaveText('1 awaiting approval2 approved');
+  await page.getByRole('button', { name: 'Return submitted hours for changes', exact: true }).click();
+  await saved(page);
+  await expect(summary).toHaveText('1 draft2 approved');
+  await page.reload();
+  const persisted = await (await page.request.get('/api/workspace')).json();
+  expect(persisted.data.sheets.find(s => s.id === 's1').rows.map(r => r.status)).toEqual(['approved', 'approved', 'draft']);
+  await page.locator('nav button[title=Timesheets]').click();
+  await expect(page.getByRole('group', { name: 'Timesheet status by row' })).toHaveCount(0);
+  await expect(page.locator('.timesheet-heading')).toContainText('Not started');
+  await expect(page.getByRole('button', { name: 'Submit draft hours', exact: true })).toBeDisabled();
 });
