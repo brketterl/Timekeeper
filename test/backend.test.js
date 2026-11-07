@@ -189,6 +189,7 @@ test('employees edit own draft hours, submit/withdraw, and cannot forge approval
   assert.equal((await app.request('/api/workspace', { method: 'PUT', cookie: admin.cookie, data: { data: full.data, revision: full.revision } })).status, 200);
   doc = (await app.request('/api/workspace', { cookie: worker.cookie })).body;
   const locked = doc.data.sheets[0];
+  assert.equal((await save([{ ...locked, status: 'draft', rows: [{ ...locked.rows[0], status: 'draft' }] }])).status, 403);
   assert.equal((await save([{ ...locked, rows: [{ ...locked.rows[0], hours: { '2026-10-01': 1 } }] }])).status, 403);
   assert.equal((await save([{ ...locked, status: 'draft', rows: [] }])).status, 403);
   assert.equal((await save([locked])).status, 200);
@@ -420,4 +421,109 @@ test('closed registration permits only valid invitations and preserves assigned 
   const db = new DatabaseSync(join(app.directory, 'timekeeper.sqlite'));
   try { assert.equal(db.prepare('SELECT COUNT(*) AS n FROM workspaces').get().n, 1); assert.equal(db.prepare('SELECT COUNT(*) AS n FROM users').get().n, 3); }
   finally { db.close(); }
+});
+
+test('invoice voids and payment reversals retain immutable records and release billing sources', async t => {
+  const { app, admin } = await setupShared(t);
+  let doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body;
+  const sheet={id:'recover-sheet',employeeId:'worker',start:'2026-10-01',status:'approved',rows:[{id:'recover-row',contractId:'assigned',status:'approved',rate:12500,note:'Work',hours:{'2026-10-01':8}}]};
+  const invoice={id:'recover-invoice',number:'REC-1',contractId:'assigned',client:'Client A',contract:'Assigned work',email:'',address:'',business:{...doc.data.settings},issued:'2026-10-01',due:'2026-10-31',sentDate:'2026-10-02',lines:[{sources:[{sheetId:sheet.id,rowId:sheet.rows[0].id}],description:'Work',employee:'Worker',start:sheet.start,end:'2026-10-15',hours:8,rate:12500,amount:100000}],payments:[{id:'original-payment',amount:100000,date:'2026-10-03',reference:'Mistyped'}],note:''};
+  doc.data.sheets.push(sheet);doc.data.invoices.push(invoice);
+  const save=data=>app.request('/api/workspace',{method:'PUT',cookie:admin.cookie,data:{data,revision:doc.revision}});
+  const reload=async()=>{doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body;return doc.data.invoices[0]};
+  assert.equal((await save(doc.data)).status,200);await reload();
+  let copy=structuredClone(doc.data);copy.invoices=[];assert.equal((await save(copy)).status,409);
+  copy=structuredClone(doc.data);copy.invoices[0].payments[0].amount=90000;assert.equal((await save(copy)).status,409);
+  copy=structuredClone(doc.data);copy.invoices[0].voided={date:'2026-11-01',reason:'Duplicate'};assert.equal((await save(copy)).status,400);
+  doc.data.invoices[0].payments[0].reversed={date:'2026-11-01',reason:'Wrong entry'};assert.equal((await save(doc.data)).status,200);await reload();
+  copy=structuredClone(doc.data);delete copy.invoices[0].payments[0].reversed;assert.equal((await save(copy)).status,409);
+  doc.data.invoices[0].payments.push({id:'replacement-payment',amount:100000,date:'2026-10-04',reference:'Corrected'});
+  assert.equal((await save(doc.data)).status,200);await reload();
+  doc.data.invoices[0].payments[1].reversed={date:'2026-11-01',reason:'Invoice duplicated'};assert.equal((await save(doc.data)).status,200);await reload();
+  doc.data.invoices[0].voided={date:'2026-11-01',reason:'Duplicate invoice'};assert.equal((await save(doc.data)).status,200);await reload();
+  copy=structuredClone(doc.data);delete copy.invoices[0].voided;assert.equal((await save(copy)).status,409);
+  doc.data.sheets[0].rows[0].status=doc.data.sheets[0].status='draft';doc.data.sheets[0].rows[0].feedback=['Correct hours after voiding invoice'];assert.equal((await save(doc.data)).status,200);await reload();
+  assert.equal(doc.data.invoices[0].lines[0].amount,100000);assert.equal(doc.data.invoices[0].payments.length,2);
+  const activity=(await app.request('/api/activity',{cookie:admin.cookie})).body;
+  assert.ok(activity.events.some(e=>e.type==='invoice.voided'));assert.ok(activity.events.some(e=>e.type==='payment.reversed'));
+});
+
+test('employees can delete their own empty timesheet without deleting other records', async t=>{
+  const {app,admin,worker}=await setupShared(t);
+  let doc=(await app.request('/api/workspace',{cookie:worker.cookie})).body;
+  const empty={id:'empty-sheet',employeeId:'worker',start:'2026-10-01',status:'draft',rows:[]};
+  assert.equal((await app.request('/api/employee/timesheets',{method:'PUT',cookie:worker.cookie,data:{sheets:[empty],revision:doc.revision}})).status,200);
+  doc=(await app.request('/api/workspace',{cookie:worker.cookie})).body;
+  assert.equal((await app.request('/api/employee/timesheets',{method:'PUT',cookie:worker.cookie,data:{sheets:[],revision:doc.revision}})).status,200);
+  assert.equal((await app.request('/api/workspace',{cookie:admin.cookie})).body.data.employees.length,2);
+});
+
+test('reviewer feedback survives employee correction and resubmission and cannot be forged or erased', async t=>{
+ const {app,admin,worker}=await setupShared(t);
+ let doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body;
+ const sheet={id:'feedback-sheet',employeeId:'worker',start:'2026-10-01',status:'submitted',rows:[{id:'feedback-row',contractId:'assigned',rate:12500,status:'submitted',hours:{'2026-10-01':8},note:'Original work'}]};doc.data.sheets.push(sheet);
+ const adminSave=data=>app.request('/api/workspace',{method:'PUT',cookie:admin.cookie,data:{data,revision:doc.revision}});
+ const reload=async()=>{doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body};
+ assert.equal((await adminSave(doc.data)).status,200);await reload();
+ let changed=structuredClone(doc.data);changed.sheets[0].status=changed.sheets[0].rows[0].status='draft';
+ assert.equal((await adminSave(changed)).status,409);
+ changed.sheets[0].rows[0].feedback=['Please clarify Tuesday’s work.'];assert.equal((await adminSave(changed)).status,200);await reload();
+ changed=structuredClone(doc.data);changed.sheets[0].rows[0].feedback=['Edited history'];assert.equal((await adminSave(changed)).status,409);
+ let own=(await app.request('/api/workspace',{cookie:worker.cookie})).body;
+ const workerSave=sheets=>app.request('/api/employee/timesheets',{method:'PUT',cookie:worker.cookie,data:{sheets,revision:own.revision}});
+ assert.deepEqual(own.data.sheets[0].rows[0].feedback,['Please clarify Tuesday’s work.']);
+ let forged=structuredClone(own.data.sheets);forged[0].rows[0].feedback=[];assert.equal((await workerSave(forged)).status,403);
+ forged=structuredClone(own.data.sheets);forged[0].rows[0].feedback.push('Forged admin note');assert.equal((await workerSave(forged)).status,403);
+ own.data.sheets[0].rows[0].note='Tuesday: prepared the weekly report.';own.data.sheets[0].status=own.data.sheets[0].rows[0].status='submitted';
+ assert.equal((await workerSave(own.data.sheets)).status,200);await reload();
+ assert.deepEqual(doc.data.sheets[0].rows[0].feedback,['Please clarify Tuesday’s work.']);
+ changed=structuredClone(doc.data);changed.sheets[0].status=changed.sheets[0].rows[0].status='draft';changed.sheets[0].rows[0].feedback.push('Also confirm the project code.');
+ assert.equal((await adminSave(changed)).status,200);await reload();
+ assert.equal(doc.data.sheets[0].rows[0].feedback.length,2);
+ const activity=(await app.request('/api/activity',{cookie:admin.cookie})).body.events.filter(e=>e.type==='timesheet.feedback_added');
+ assert.equal(activity.length,2);assert.equal(activity[0].actorId,admin.body.user.id);assert.equal(activity[0].details.reason,'Also confirm the project code.');
+});
+
+test('approval queue includes mixed and older sheets, isolates workspaces and preserves oldest row submission age', async t=>{
+ const {app,admin,worker}=await setupShared(t);
+ let doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body;
+ const row=(id,status,hours)=>({id,contractId:'assigned',rate:12500,status,note:'',hours:{'2026-09-01':hours}});
+ doc.data.sheets=[{id:'old-pending',employeeId:'worker',start:'2026-09-01',status:'draft',rows:[row('approved','approved',8),row('pending','submitted',2),row('draft','draft',1)]},{id:'new-pending',employeeId:'worker',start:'2026-10-01',status:'submitted',rows:[{...row('recent','submitted',4),hours:{'2026-10-01':4}}]},{id:'done',employeeId:'worker',start:'2026-11-01',status:'approved',rows:[{...row('done-row','approved',1),hours:{'2026-11-01':1}}]}];
+ const save=()=>app.request('/api/workspace',{method:'PUT',cookie:admin.cookie,data:{data:doc.data,revision:doc.revision}});
+ const reload=async()=>{doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body};
+ const queue=async()=> (await app.request('/api/approvals',{cookie:admin.cookie})).body.entries;
+ assert.equal((await save()).status,200);await reload();
+ const db=new DatabaseSync(join(app.directory,'timekeeper.sqlite'));t.after(()=>db.close());
+ const oldDate=Date.now()-5*86400000,newDate=Date.now()-86400000;
+ // Append fixture events; the audit log's no-update/no-delete protection stays enabled.
+ const appendSubmission=(sheetId,date,legacy=false)=>db.prepare(`INSERT INTO audit_events(workspace_id,actor_id,actor_name,actor_role,event_type,entity_id,summary,details,created_at)
+   SELECT workspace_id,actor_id,actor_name,actor_role,event_type,entity_id,summary,CASE WHEN ? THEN json_remove(details,'$.rowIds') ELSE details END,? FROM audit_events WHERE entity_id=? AND event_type='timesheet.submitted' ORDER BY id DESC LIMIT 1`).run(Number(legacy),date,sheetId);
+ appendSubmission('old-pending',oldDate);appendSubmission('new-pending',newDate);
+ let entries=await queue();assert.deepEqual(entries.map(e=>e.sheetId),['old-pending','new-pending']);assert.equal(entries[0].submittedHours,2);assert.equal(entries[0].submittedRows,1);assert.equal(entries[0].submittedAt,oldDate);
+ assert.equal((await app.request('/api/approvals',{cookie:worker.cookie})).status,403);
+ const outsider=await app.request('/api/auth/register',{method:'POST',data:{...account,email:'queue-outsider@example.test'}});
+ assert.deepEqual((await app.request('/api/approvals?workspaceId=forged',{cookie:outsider.cookie})).body.entries,[]);
+ doc.data.sheets[0].rows[2].status='submitted';doc.data.sheets[0].status='submitted';assert.equal((await save()).status,200);await reload();
+ entries=await queue();assert.equal(entries[0].submittedHours,3);assert.equal(entries[0].submittedAt,oldDate);
+ doc.data.sheets[0].rows[1].status='approved';assert.equal((await save()).status,200);await reload();
+ entries=await queue();assert.ok(entries[0].submittedAt>newDate);
+ doc.data.sheets[0].rows[2].status='draft';doc.data.sheets[0].rows[2].feedback=['Clarify this entry'];doc.data.sheets[0].status='draft';assert.equal((await save()).status,200);await reload();
+ assert.deepEqual((await queue()).map(e=>e.sheetId),['new-pending']);
+ appendSubmission('new-pending',newDate,true);
+ assert.equal((await queue())[0].submittedAt,null);
+});
+
+test('standard drafts accept selected approved sources and edits without double billing or editing sent records', async t=>{
+ const {app,admin}=await setupShared(t);let doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body;
+ doc.data.sheets=['2026-09-01','2026-10-01'].map((start,index)=>({id:'select-sheet-'+index,employeeId:'worker',start,status:'approved',rows:[{id:'select-row-'+index,contractId:'assigned',rate:12500,status:'approved',note:'Work '+index,hours:{[start]:index+1}}]}));
+ const line=index=>({sources:[{sheetId:'select-sheet-'+index,rowId:'select-row-'+index}],description:'Selected work',employee:'Worker',start:doc.data.sheets[index].start,end:index?'2026-10-15':'2026-09-15',hours:index+1,rate:12500,amount:(index+1)*12500});
+ const draft={id:'selected-draft',number:'SEL-1',contractId:'assigned',client:'Client A',contract:'Assigned work',email:'',address:'',business:{...doc.data.settings},issued:'2026-10-01',due:'2026-10-31',sentDate:null,payments:[],lines:[line(1)],note:''};doc.data.invoices.push(draft);
+ const save=data=>app.request('/api/workspace',{method:'PUT',cookie:admin.cookie,data:{data,revision:doc.revision}}),reload=async()=>{doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body};
+ assert.equal((await save(doc.data)).status,200);await reload();
+ let duplicate=structuredClone(doc.data);duplicate.invoices.push({...structuredClone(draft),id:'duplicate',number:'SEL-2'});assert.equal((await save(duplicate)).status,400);
+ doc.data.invoices[0].lines=[line(0)];doc.data.invoices[0].note='Updated draft';doc.data.invoices[0].address='Corrected address';assert.equal((await save(doc.data)).status,200);await reload();
+ assert.equal(doc.data.invoices[0].number,'SEL-1');assert.equal(doc.data.invoices[0].id,'selected-draft');
+ doc.data.invoices.push({...structuredClone(draft),id:'other-draft',number:'SEL-2'});assert.equal((await save(doc.data)).status,200);await reload();
+ doc.data.invoices[0].sentDate='2026-10-02';assert.equal((await save(doc.data)).status,200);await reload();
+ doc.data.invoices[0].note='Cannot change sent invoice';assert.equal((await save(doc.data)).status,409);
 });

@@ -6,6 +6,14 @@ export const isGovernment = c => c?.invoiceTemplate === 'government' || c?.billi
 export const validDate = x => typeof x === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(x) && new Date(x+'T12:00:00Z').toISOString().slice(0,10) === x;
 export const monthEnd = month => new Date(Date.UTC(Number(month.slice(0,4)),Number(month.slice(5,7)),0,12)).toISOString().slice(0,10);
 const unique = xs => new Set(xs.map(x=>x.id)).size === xs.length;
+export const paymentTotal = i => i.payments.filter(p=>!p.reversed).reduce((n,p)=>n+p.amount,0);
+export function voidBlockReason(data,i){
+ if(!i.sentDate)return 'Only sent invoices can be voided.';
+ if(i.voided)return 'This invoice is already voided.';
+ if(paymentTotal(i)>0)return 'Reverse recorded payments before voiding this invoice. This does not refund money.';
+ if(i.government&&data.invoices.some(other=>!other.voided&&other.contractId===i.contractId&&other.government?.taskOrderId===i.government.taskOrderId&&other.government.month>i.government.month))return 'Void newer invoices for this task order first to preserve cumulative totals.';
+ return '';
+}
 export function validateBilling(data) {
   try {
     const signers = data.settings.invoiceSigners || [];
@@ -24,8 +32,10 @@ export function validateBilling(data) {
       const g=i.government;
       if(g.version!==1||!id(g.taskOrderId)||!/^\d{4}-(0[1-9]|1[0-2])$/.test(g.month)||!text(g.agreementNumber)||!text(g.taskOrderNumber,50)||!text(g.project)||!validDate(g.popStart)||!validDate(g.popEnd)||!cents(g.funding)||g.funding<1||!cents(g.cumulativeAmount)||!Number.isFinite(g.cumulativeHours)||g.cumulativeHours<0||!cents(g.remaining)||g.remaining!==g.funding-g.cumulativeAmount||!text(g.signerName,100)||!text(g.signerTitle,100)||!text(g.certification,2000)||!Array.isArray(g.rows)||!g.rows.length) return false;
       if(!g.rows.every(r=>id(r.employeeId)&&id(r.categoryId)&&text(r.employee,100)&&text(r.category,100)&&cents(r.rate)&&r.rate>0&&Number.isFinite(r.hours)&&r.hours>=0&&cents(r.amount)&&Number.isFinite(r.cumulativeHours)&&r.cumulativeHours>=r.hours&&cents(r.cumulativeAmount)&&r.cumulativeAmount>=r.amount))return false;
-      if(data.invoices.filter(other=>other.contractId===i.contractId&&other.government?.taskOrderId===g.taskOrderId&&other.government.month===g.month).length!==1)return false;
-      const earlier=data.invoices.filter(other=>other.contractId===i.contractId&&other.government?.taskOrderId===g.taskOrderId&&other.government.month<g.month);
+      if(g.rows.reduce((n,r)=>n+r.amount,0)!==i.lines.reduce((n,l)=>n+l.amount,0)||g.rows.reduce((n,r)=>n+r.cumulativeAmount,0)!==g.cumulativeAmount||g.rows.reduce((n,r)=>n+r.cumulativeHours,0)!==g.cumulativeHours)return false;
+      if(i.voided)continue;
+      if(data.invoices.filter(other=>!other.voided&&other.contractId===i.contractId&&other.government?.taskOrderId===g.taskOrderId&&other.government.month===g.month).length!==1)return false;
+      const earlier=data.invoices.filter(other=>!other.voided&&other.contractId===i.contractId&&other.government?.taskOrderId===g.taskOrderId&&other.government.month<g.month);
       if(earlier.some(other=>!other.sentDate))return false;
       const expected=new Map();
       for(const l of [...earlier.flatMap(other=>other.lines),...i.lines]){
@@ -34,7 +44,7 @@ export function validateBilling(data) {
         expected.get(key).hours+=l.hours;expected.get(key).amount+=l.amount;
       }
       if(expected.size!==g.rows.length||!g.rows.every(r=>{const value=expected.get([r.employeeId,r.categoryId,r.rate].join('|'));return value&&value.hours===r.cumulativeHours&&value.amount===r.cumulativeAmount}))return false;
-      if(g.rows.reduce((n,r)=>n+r.amount,0)!==i.lines.reduce((n,l)=>n+l.amount,0)||g.rows.reduce((n,r)=>n+r.cumulativeAmount,0)!==g.cumulativeAmount||g.rows.reduce((n,r)=>n+r.cumulativeHours,0)!==g.cumulativeHours)return false;
+
     }
     return true;
   }catch{return false;}
@@ -60,10 +70,10 @@ export function governmentInvoice(data,input,invoiceId) {
   if(!order||!signer)throw Error('Select a task order and an invoice signer.');
   if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(input.month)||!validDate(input.issued)||!validDate(input.due)||input.issued<monthEnd(input.month)||input.due<input.issued)throw Error('Use a calendar month and an invoice date on or after that month ends, with a valid due date.');
   if(data.invoices.some(i=>i.contractId===c.id&&!i.government))throw Error('This contract has standard-format invoices that cannot be assigned to a task order automatically. Use a separate government contract record and enter its history chronologically.');
-  const previous=data.invoices.filter(i=>i.contractId===c.id&&i.government?.taskOrderId===order.id);
+  const previous=data.invoices.filter(i=>!i.voided&&i.contractId===c.id&&i.government?.taskOrderId===order.id);
   if(previous.some(i=>!i.sentDate))throw Error('Mark the previous task-order invoice as sent before creating the next one.');
   if(previous.some(i=>i.government.month>=input.month))throw Error('Create historical invoices oldest first. This task order already has an invoice for this or a later month.');
-  const billed=new Set(data.invoices.flatMap(i=>i.lines.flatMap(l=>l.sources.map(s=>s.sheetId+'|'+s.rowId))));
+  const billed=new Set(data.invoices.filter(i=>!i.voided).flatMap(i=>i.lines.flatMap(l=>l.sources.map(s=>s.sheetId+'|'+s.rowId))));
   if(data.sheets.filter(s=>s.start.slice(0,7)===input.month).some(s=>s.rows.some(r=>r.contractId===c.id&&!r.taskOrderId&&Object.values(r.hours).some(h=>h>0))))throw Error('Some time in this month is missing task-order and labor-category details. Complete it before billing.');
   const candidates=data.sheets.filter(s=>s.start.slice(0,7)===input.month).flatMap(s=>s.rows.filter(r=>r.contractId===c.id&&r.taskOrderId===order.id&&Object.values(r.hours).some(h=>h>0)).map(r=>({s,r})));
   if(candidates.some(({r})=>r.status!=='approved'))throw Error('Approve all time for this task order and month before invoicing.');

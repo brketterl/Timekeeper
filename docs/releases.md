@@ -2,7 +2,7 @@
 
 `main` is the released source. `staging` is the test branch. A staging push does not change `main`, and must not trigger a production deployment. If a hosted staging service is used, it must have its own SQLite disk, separate from production.
 
-The current agreed workflow uses local VS Code testing of `staging` instead of purchasing a second Render instance. The separate hosted staging service below is optional. For local review, fetch/switch/pull `staging`, run the automated checks, start the app with your local test database, and review the changed screens. Record the reviewed commit before approving a release. Do not test mutations against the production service or copy the production database into automated tests.
+Use a separate hosted Render staging service for user review. Push tested changes to `staging`, wait for that commit to deploy, and review the staging URL before approving a release to `main`. Local VS Code validation is optional, not a release requirement. Record the reviewed commit before approving a release. Do not test mutations against the production service or copy the production database into automated tests.
 
 ## One-time dashboard settings
 
@@ -11,11 +11,11 @@ These must be applied in GitHub and Render. Committing configuration or opening 
 ### Production Render service
 
 1. Open the existing production service for `timekeeper-sbzu.onrender.com`.
-2. Under Settings, change **Auto-Deploy** to **Off**. Keep its branch set to **main**.
+2. Keep **Auto-Deploy → On Commit** enabled and its branch set to **main**, as requested by the user.
 3. Keep its existing persistent disk, mount, and `DATA_DIR` unchanged. Do not create a replacement production service or delete its disk.
-4. Releases will use **Manual Deploy → Deploy a specific commit**, choosing an approved commit on `main`. Record that commit for reference.
+4. Merging approved changes into `main` automatically deploys production. Record the resulting deployed commit for reference.
 
-This provides a manual release boundary even before GitHub branch protections are configured.
+The release approval boundary is the merge into `main`; obtain user approval before merging or pushing production changes.
 
 ### Staging Render service
 
@@ -25,7 +25,7 @@ Create a new, separate Node Web Service connected to the same GitHub repository:
 | --- | --- |
 | Name | `timekeeper-staging` |
 | Branch | `staging` |
-| Build command | `npm test` |
+| Build command | `npm ci && npm test` |
 | Start command | `npm start` |
 | Instance type | Starter |
 | Auto-Deploy | On Commit |
@@ -40,6 +40,18 @@ Render supplies `PORT` and `RENDER_EXTERNAL_URL`. Do not copy production's `APP_
 
 Staging requires another paid service and disk; review the charges before creating them. The identical `/var/data` mount path is safe because these are separate services with separate disks. Never attach, upload, or restore the production database to staging. Create dummy accounts and use sample data. The staging database is not promoted to production; only code is released.
 
+Staging URL: <https://timekeeper-staging-43o7.onrender.com>
+
+### Initialize and verify hosted staging
+
+1. Check for an existing staging service before creating another. Confirm its repository is `brketterl/Timekeeper`, branch is `staging`, and its disk is separate from production. Record its HTTPS URL and deployed commit.
+2. For a fresh, empty staging database only, temporarily set `ALLOW_PUBLIC_REGISTRATION=true` in the staging service environment and redeploy. Create your test admin account at the staging URL. Then remove the variable or set it to `false`, redeploy, and confirm **Create an account** is no longer offered to an unauthenticated visitor. Do not enable public registration on production.
+3. Sign in to staging and use **Settings → Reload sample workspace**. Create invitations for any additional test users; use separate admin and employee accounts to review permissions. Do not restore production data or copy production email, backup, or storage credentials. Outbound email integrations can stay disabled for initial workflow review.
+4. Verify `/health`, sign-in, sample timesheet editing, and a save/reload. After a staging redeploy, confirm the test account and saved records persist on its disk.
+5. Confirm staging deploys from `staging` and production still uses `main` with auto-deploy on. Dashboard verification is required; these files alone do not establish either setting.
+
+The review cycle is: automated checks → push to `staging` → hosted staging review → explicit release approval → merge to `main` → automatic production deploy. Only code moves between environments; staging accounts and data stay in staging.
+
 ### Protect main in GitHub
 
 In the repository, open **Settings → Rules → Rulesets** and create an active branch ruleset targeting `main` (or use the branch protection settings available to your account):
@@ -50,7 +62,7 @@ In the repository, open **Settings → Rules → Rulesets** and create an active
 - Block force pushes and branch deletion; apply rules to administrators and avoid bypass actors.
 - If a second GitHub collaborator can review, require one approval and dismiss stale approvals when new commits are pushed. PR authors cannot approve their own PRs.
 
-If GitHub does not offer enforcement for the repository's visibility and plan, keep production's Render auto-deploy off and use the PR process and manual release boundary. Do not describe branch protection as enabled until the settings are saved and verified.
+If GitHub does not offer enforcement for the repository's visibility and plan, use the PR process and require explicit user release approval before merging into `main`; production auto-deploy stays enabled. Do not describe branch protection as enabled until the settings are saved and verified.
 
 ## Development cycle
 
@@ -58,10 +70,10 @@ If GitHub does not offer enforcement for the repository's visibility and plan, k
 2. Install the locked test tools with `npm ci`. For browser tests, run `npx playwright install chromium` once on the development machine.
 3. Run `npm test` and `npm run test:e2e`. Add checks for the changed behavior when needed. Browser tests always start a private server with a new temporary database; they never use the developer or production `DATA_DIR`.
 4. Push the change to `staging`, or open a feature PR targeting `staging` and merge after checks pass. GitHub runs the backend suite in test and production modes plus Chromium browser tests.
-5. Test the staging checkout locally in VS Code using fake records and the appropriate admin/employee roles. If you separately configured a hosted staging service, testing that deployment is an optional additional check.
+5. Wait for the exact tested commit to deploy to the hosted staging service. Review its URL using fake records and the appropriate admin/employee roles. Local testing is optional; user review happens on hosted staging.
 6. Record the tested commit and ask the user to approve the concrete result. New commits require checks and review again.
 7. Open a PR from `staging` into `main`. For this repository, the compare page is <https://github.com/brketterl/Timekeeper/compare/main...staging?expand=1>. Review the final diff and required checks. Merge only after the user authorizes that release.
-8. Back up the production database before any data migration. Manually deploy the approved `main` commit in Render, then check `/health`, login, and the changed behavior on production.
+8. Before merging a release with a data migration, back up the production database. After the approved merge into `main`, monitor the automatic Render deployment, then check `/health`, login, and the changed behavior on production.
 9. Merge the released `main` back into `staging` if the PR merge/squash/rebase created different history, so later releases do not reintroduce old changes.
 
 GitHub Actions failures include a browser report artifact for troubleshooting. Automated checks reduce regressions; they do not replace testing the staged change or checking production after release.

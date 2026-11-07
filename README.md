@@ -145,3 +145,5 @@ Registration is invitation-only by default. Keep `ALLOW_PUBLIC_REGISTRATION` uns
 [Timesheet submission and approval emails](docs/timesheet-emails.md) use an optional durable Resend queue, enabled with `TIMESHEET_EMAIL_ENABLED=true`. Admins can view delivery status/retry failures in Settings. Migration 5 requires a verified pre-release production recovery backup.
 
 [Government invoice setup and historical billing](docs/government-invoices.md) supports contract/category rates, multiple task orders, monthly source selection, custom numbering, signer text, and frozen cumulative/funding snapshots. Standard invoices remain the default.
+
+[Draft deletion and financial corrections](docs/corrections.md) explains contract archiving, draft-row Undo, empty-timesheet deletion, invoice voids, payment-entry reversals, and rollback limits.

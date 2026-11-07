@@ -102,3 +102,14 @@ test('future-dated invoices can record an actual earlier send date, but not a fu
   invoice.sentDate='2099-11-01';assert.equal(validBackup(d),false);
   invoice.sentDate='invalid';assert.equal(validBackup(d),false);
 });
+
+test('voiding government invoices preserves snapshots and allows replacement without double counting', async()=>{
+  const {voidBlockReason}=await import('../public/billing.js');
+  const d=data();sheet(d,'july','2026-07-01',8);const july=governmentInvoice(d,input('2026-07'),'july-invoice');july.sentDate='2026-07-31';
+  sheet(d,'aug','2026-08-01',4);const aug=governmentInvoice(d,input('2026-08'),'aug-invoice');aug.sentDate='2026-08-31';
+  assert.match(voidBlockReason(d,july),/newer/);assert.equal(voidBlockReason(d,aug),'');
+  aug.voided={date:'2026-11-01',reason:'Incorrect invoice'};assert(validBackup(d));
+  const replacement=governmentInvoice(d,input('2026-08'),'replacement');
+  assert.equal(replacement.government.cumulativeHours,12);assert.equal(replacement.lines[0].hours,4);assert(validBackup(d));
+  const frozen=structuredClone(aug);d.sheets.find(s=>s.id==='aug').rows[0].note='Corrected work note';assert.deepEqual(aug,frozen);
+});
