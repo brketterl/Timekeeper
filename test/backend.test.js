@@ -422,3 +422,38 @@ test('closed registration permits only valid invitations and preserves assigned 
   try { assert.equal(db.prepare('SELECT COUNT(*) AS n FROM workspaces').get().n, 1); assert.equal(db.prepare('SELECT COUNT(*) AS n FROM users').get().n, 3); }
   finally { db.close(); }
 });
+
+test('invoice voids and payment reversals retain immutable records and release billing sources', async t => {
+  const { app, admin } = await setupShared(t);
+  let doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body;
+  const sheet={id:'recover-sheet',employeeId:'worker',start:'2026-10-01',status:'approved',rows:[{id:'recover-row',contractId:'assigned',status:'approved',rate:12500,note:'Work',hours:{'2026-10-01':8}}]};
+  const invoice={id:'recover-invoice',number:'REC-1',contractId:'assigned',client:'Client A',contract:'Assigned work',email:'',address:'',business:{...doc.data.settings},issued:'2026-10-01',due:'2026-10-31',sentDate:'2026-10-02',lines:[{sources:[{sheetId:sheet.id,rowId:sheet.rows[0].id}],description:'Work',employee:'Worker',start:sheet.start,end:'2026-10-15',hours:8,rate:12500,amount:100000}],payments:[{id:'original-payment',amount:100000,date:'2026-10-03',reference:'Mistyped'}],note:''};
+  doc.data.sheets.push(sheet);doc.data.invoices.push(invoice);
+  const save=data=>app.request('/api/workspace',{method:'PUT',cookie:admin.cookie,data:{data,revision:doc.revision}});
+  const reload=async()=>{doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body;return doc.data.invoices[0]};
+  assert.equal((await save(doc.data)).status,200);await reload();
+  let copy=structuredClone(doc.data);copy.invoices=[];assert.equal((await save(copy)).status,409);
+  copy=structuredClone(doc.data);copy.invoices[0].payments[0].amount=90000;assert.equal((await save(copy)).status,409);
+  copy=structuredClone(doc.data);copy.invoices[0].voided={date:'2026-11-01',reason:'Duplicate'};assert.equal((await save(copy)).status,400);
+  doc.data.invoices[0].payments[0].reversed={date:'2026-11-01',reason:'Wrong entry'};assert.equal((await save(doc.data)).status,200);await reload();
+  copy=structuredClone(doc.data);delete copy.invoices[0].payments[0].reversed;assert.equal((await save(copy)).status,409);
+  doc.data.invoices[0].payments.push({id:'replacement-payment',amount:100000,date:'2026-10-04',reference:'Corrected'});
+  assert.equal((await save(doc.data)).status,200);await reload();
+  doc.data.invoices[0].payments[1].reversed={date:'2026-11-01',reason:'Invoice duplicated'};assert.equal((await save(doc.data)).status,200);await reload();
+  doc.data.invoices[0].voided={date:'2026-11-01',reason:'Duplicate invoice'};assert.equal((await save(doc.data)).status,200);await reload();
+  copy=structuredClone(doc.data);delete copy.invoices[0].voided;assert.equal((await save(copy)).status,409);
+  doc.data.sheets[0].rows[0].status=doc.data.sheets[0].status='draft';assert.equal((await save(doc.data)).status,200);await reload();
+  assert.equal(doc.data.invoices[0].lines[0].amount,100000);assert.equal(doc.data.invoices[0].payments.length,2);
+  const activity=(await app.request('/api/activity',{cookie:admin.cookie})).body;
+  assert.ok(activity.events.some(e=>e.type==='invoice.voided'));assert.ok(activity.events.some(e=>e.type==='payment.reversed'));
+});
+
+test('employees can delete their own empty timesheet without deleting other records', async t=>{
+  const {app,admin,worker}=await setupShared(t);
+  let doc=(await app.request('/api/workspace',{cookie:worker.cookie})).body;
+  const empty={id:'empty-sheet',employeeId:'worker',start:'2026-10-01',status:'draft',rows:[]};
+  assert.equal((await app.request('/api/employee/timesheets',{method:'PUT',cookie:worker.cookie,data:{sheets:[empty],revision:doc.revision}})).status,200);
+  doc=(await app.request('/api/workspace',{cookie:worker.cookie})).body;
+  assert.equal((await app.request('/api/employee/timesheets',{method:'PUT',cookie:worker.cookie,data:{sheets:[],revision:doc.revision}})).status,200);
+  assert.equal((await app.request('/api/workspace',{cookie:admin.cookie})).body.data.employees.length,2);
+});

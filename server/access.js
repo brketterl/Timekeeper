@@ -1,6 +1,6 @@
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { isGovernment, rowTerms, governmentInvoice } from '../public/billing.js';
+import { isGovernment, rowTerms, governmentInvoice, voidBlockReason } from '../public/billing.js';
 import { auditStore } from './audit.js';
 import { validBackup } from './validation.js';
 
@@ -85,9 +85,19 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       const before = document(session.workspace_id).data;
       for (const old of restore ? [] : before.invoices) {
         const incoming = input.data.invoices.find(i=>i.id===old.id);
-        if (old.government && old.sentDate && (!incoming || !equal({ ...old, payments: [] }, { ...incoming, payments: [] }))) throw fail(409,'Issued invoices cannot be changed or removed. Record payments separately.');
-        if (old.government && incoming && !equal({ ...old, payments: [], sentDate: null }, { ...incoming, payments: [], sentDate: null })) throw fail(409,'Government invoice snapshots cannot be edited. Delete an unsent draft and recreate it.');
+        const snapshot=invoice=>{const {payments,voided,...rest}=invoice;return rest};
+        if(old.sentDate&&(!incoming||!equal(snapshot(old),snapshot(incoming))))throw fail(409,'Sent invoices cannot be changed or deleted. Void the invoice instead.');
+        if(old.government&&incoming&&!equal({...snapshot(old),sentDate:null},{...snapshot(incoming),sentDate:null}))throw fail(409,'Government invoice snapshots cannot be edited. Delete an unsent draft and recreate it.');
+        if(!incoming)continue;
+        if(old.voided&&(!equal(old.voided,incoming.voided)||!equal(old.payments,incoming.payments)))throw fail(409,'Voided invoices cannot be changed.');
+        if(!old.voided&&incoming.voided){const reason=voidBlockReason(before,old);if(reason)throw fail(409,reason)}
+        for(const prior of old.payments){
+          const payment=incoming.payments.find(p=>p.id===prior.id);
+          if(!payment||!equal({...prior,reversed:null},{...payment,reversed:null})||(prior.reversed&&!equal(prior.reversed,payment.reversed)))throw fail(409,'Recorded payments cannot be changed or deleted. Reverse the entry instead.');
+        }
+        if(incoming.payments.some(p=>!old.payments.some(old=>old.id===p.id)&&p.reversed))throw fail(400,'Record a payment before reversing it.');
       }
+      if(!restore&&input.data.invoices.some(i=>i.voided&&!before.invoices.some(old=>old.id===i.id)))throw fail(400,'Record and send an invoice before voiding it.');
       if(!restore&&input.data.invoices.some(i=>i.government&&!before.invoices.some(old=>old.id===i.id))) throw fail(400,'Create government invoices using the monthly billing action.');
       for(const sheet of restore ? [] : input.data.sheets) for(const row of sheet.rows) {
         const c=input.data.contracts.find(c=>c.id===row.contractId);
@@ -111,7 +121,7 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       const doc = document(session.workspace_id), employee = doc.data.employees.find(e => e.id === session.employee_id && e.active);
       if (!employee) throw fail(403, 'Your employee record is inactive.');
       const oldSheets = doc.data.sheets.filter(s => s.employeeId === employee.id);
-      if (oldSheets.some(old => !input.sheets.some(s => s.id === old.id))) throw fail(403, 'Existing timesheets cannot be deleted.');
+      if (oldSheets.some(old => old.rows.length && !input.sheets.some(s => s.id === old.id))) throw fail(403, 'Existing timesheets cannot be deleted.');
       const incoming = input.sheets.map(s => {
         if (!s || Object.keys(s).some(k => !['id', 'employeeId', 'start', 'status', 'rows'].includes(k)) || s.employeeId !== employee.id || !Array.isArray(s.rows)) throw fail(403, 'Only your own timesheets may be changed.');
         const old = oldSheets.find(x => x.id === s.id);

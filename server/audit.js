@@ -33,8 +33,10 @@ export function auditStore(db, { onEvent = () => {} } = {}) {
       const old = before.invoices.find(i => i.id === invoice.id), info = { number: invoice.number };
       if (!old) log('invoice.created', invoice.id, `Created invoice ${invoice.number}`, info);
       else if (!equal({ ...old, payments: [] }, { ...invoice, payments: [] })) log('invoice.updated', invoice.id, `Updated invoice ${invoice.number}`, info);
+      if(!old?.voided&&invoice.voided)log('invoice.voided',invoice.id,`Voided invoice ${invoice.number}`,{...info,...invoice.voided});
       for (const payment of invoice.payments) {
         const previous = old?.payments.find(p => p.id === payment.id);
+        if(previous&&!previous.reversed&&payment.reversed)log('payment.reversed',payment.id,`Reversed payment entry for invoice ${invoice.number}`,{invoiceId:invoice.id,amount:payment.amount,...payment.reversed});
         if (!previous || !equal(previous, payment)) log(previous ? 'payment.updated' : 'payment.recorded', payment.id,
           `${previous ? 'Updated' : 'Recorded'} payment for invoice ${invoice.number}`, { invoiceId: invoice.id, number: invoice.number, amount: payment.amount, date: payment.date });
       }
