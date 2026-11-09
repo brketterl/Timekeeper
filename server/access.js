@@ -1,8 +1,9 @@
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { isGovernment, rowTerms, governmentInvoice, voidBlockReason } from '../public/billing.js';
+import { isGovernment, rowTerms, governmentInvoice, governmentInvoiceBasis, voidBlockReason } from '../public/billing.js';
 import { auditStore } from './audit.js';
 import { validBackup } from './validation.js';
+import { applyChanges } from './changes.js';
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -104,6 +105,8 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
   }
   function writeAdmin(session, input, { restore = false } = {}) {
     return transaction(() => {
+      const patched=Object.hasOwn(input,'changes');
+      if(patched){const current=document(session.workspace_id);input={data:applyChanges(current.data,input.changes),revision:current.revision}}
       if (!input.data || !validBackup(input.data)) throw fail(400, 'Invalid workspace data.');
       for (const member of members(session.workspace_id)) {
         const employee = input.data.employees.find(e => e.id === member.employeeId);
@@ -144,11 +147,13 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       const result = write(session.workspace_id, input.data, input.revision);
       audit.changes(session, before, input.data, { restored: restore });
       if(restore)log(session,'workspace.restored',session.workspace_id,'Restored workspace JSON backup');
-      return result;
+      return patched?{...result,data:read(session).data}:result;
     });
   }
   function writeEmployee(session, input) {
     return transaction(() => {
+      const patched=Object.hasOwn(input,'changes');
+      if(patched){const current=read(session);input={sheets:applyChanges(current.data,input.changes,{employee:true}).sheets,revision:current.revision}}
       if (Object.keys(input).some(k => !['sheets', 'revision'].includes(k)) || !Array.isArray(input.sheets)) throw fail(400, 'Only your timesheets may be updated.');
       const doc = document(session.workspace_id), employee = doc.data.employees.find(e => e.id === session.employee_id && e.active);
       if (!employee) throw fail(403, 'Your employee record is inactive.');
@@ -185,7 +190,7 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       doc.data.sheets = [...doc.data.sheets.filter(s => s.employeeId !== employee.id), ...incoming];
       const result = write(session.workspace_id, doc.data, input.revision);
       audit.changes(session, before, doc.data);
-      return result;
+      return patched?{...result,data:read(session).data}:result;
     });
   }
   function changeEmail(session, email, verifiedHash, sessionHash) {
@@ -218,9 +223,9 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       JOIN workspaces w ON w.id = m.workspace_id WHERE m.user_id = ? ORDER BY w.created_at, w.id`).all(session.user_id);
     if (path === '/api/invitations/accept' && method === 'POST') return transaction(() => ({ workspaceId: join(invitation(input.token), { id: session.user_id, email: session.email, name: session.name }) }));
     if (path === '/api/workspace' && method === 'GET') return read(session);
-    if (path === '/api/employee/timesheets' && method === 'PUT') {
+    if (path === '/api/employee/timesheets' && ['PUT','PATCH'].includes(method)) {
       if (session.role !== 'employee') throw fail(403, 'Employee access is required.');
-      return writeEmployee(session, input);
+      return writeEmployee(session,method==='PATCH'?{changes:input.changes}:input);
     }
     if (session.role !== 'admin') throw fail(403, 'Admin access is required.');
     const employeeMatch = /^\/api\/employees\/([a-zA-Z0-9_-]+)\/remove$/.exec(path);
@@ -246,7 +251,8 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
     });
     if (path === '/api/invoices/government' && method === 'POST') return transaction(() => {
       const doc=document(session.workspace_id),before=structuredClone(doc.data);
-      if(input.revision!==doc.revision)throw fail(409,'Workspace changed. Reload before creating this invoice.');
+      if(input.basis!==undefined){if(!equal(input.basis,governmentInvoiceBasis(doc.data,input)))throw fail(409,'The time, billing setup, or earlier invoices for this invoice changed. Reopen the invoice form to review the latest details.')}
+      else if(input.revision!==doc.revision)throw fail(409,'Workspace changed. Reload before creating this invoice.');
       let invoice;
       try { invoice=governmentInvoice(doc.data,input,randomUUID()); } catch(e) { throw fail(400,e.message); }
       const result=write(session.workspace_id,doc.data,doc.revision);
@@ -254,7 +260,7 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       return {...result,invoiceId:invoice.id};
     });
     if (path === '/api/workspace/import' && method === 'POST') return writeAdmin(session,input,{restore:true});
-    if (path === '/api/workspace' && method === 'PUT') return writeAdmin(session, input);
+    if (path === '/api/workspace' && ['PUT','PATCH'].includes(method)) return writeAdmin(session,method==='PATCH'?{changes:input.changes}:input);
     if (path === '/api/timesheet-notifications/retry' && method === 'POST') return retryNotifications(session.workspace_id);
     if (path === '/api/timesheet-notifications/status' && method === 'GET') return notificationStatus(session.workspace_id);
     if(path==='/api/approvals'&&method==='GET'){

@@ -550,3 +550,40 @@ test('whole timesheets reject partial submissions, withdrawals, approvals and lo
  sheet.rows.forEach(r=>r.status='approved');sheet.status='approved';sheet.rows.push({id:'extra',contractId:'assigned',status:'draft',hours:{},note:''});sheet.status='draft';
  assert.equal((await save()).status,409);
 });
+
+test('record saves merge unrelated admin and employee edits but reject changes to the same record',async t=>{
+ const {app,admin,worker}=await setupShared(t);
+ const adminDoc=(await app.request('/api/workspace',{cookie:admin.cookie})).body;
+ const workerDoc=(await app.request('/api/workspace',{cookie:worker.cookie})).body;
+ const sheet={id:'concurrent-sheet',employeeId:'worker',start:'2026-10-01',status:'draft',rows:[{id:'concurrent-row',contractId:'assigned',status:'draft',hours:{'2026-10-01':2},note:''}]};
+ const employeePatch=changes=>app.request('/api/employee/timesheets',{method:'PATCH',cookie:worker.cookie,data:{changes}});
+ const adminPatch=changes=>app.request('/api/workspace',{method:'PATCH',cookie:admin.cookie,data:{changes}});
+ assert.equal((await employeePatch([{collection:'sheets',id:sheet.id,before:null,after:sheet}])).status,200);
+ const business=adminDoc.data.settings.business;
+ const changed=await adminPatch([{collection:'settings',id:'business',before:business,after:'Concurrent business'}]);assert.equal(changed.status,200);
+ assert.equal(changed.body.data.sheets.length,1);
+ assert.equal((await employeePatch([{collection:'sheets',id:'duplicate-period',before:null,after:{...sheet,id:'duplicate-period'}}])).status,409);
+ const staleSetting=await adminPatch([{collection:'settings',id:'business',before:business,after:'Overwrite'}]);assert.equal(staleSetting.status,409);
+ const old=(await app.request('/api/workspace',{cookie:worker.cookie})).body.data.sheets[0];
+ const edited=structuredClone(old);edited.rows[0].hours['2026-10-01']=3;
+ assert.equal((await employeePatch([{collection:'sheets',id:old.id,before:old,after:edited}])).status,200);
+ const stale=structuredClone(old);stale.rows[0].note='Stale edit';
+ assert.equal((await employeePatch([{collection:'sheets',id:old.id,before:old,after:stale}])).status,409);
+ assert.equal((await employeePatch([{collection:'settings',id:'business',before:'Concurrent business',after:'Forbidden'}])).status,403);
+ const forbidden={...sheet,id:'other-person',employeeId:adminDoc.employeeId};
+ assert.equal((await employeePatch([{collection:'sheets',id:forbidden.id,before:null,after:forbidden}])).status,403);
+ const latest=(await app.request('/api/workspace',{cookie:worker.cookie})).body;
+ const submitted=structuredClone(latest.data.sheets[0]);submitted.status=submitted.rows[0].status='submitted';
+ assert.equal((await employeePatch([{collection:'sheets',id:submitted.id,before:latest.data.sheets[0],after:submitted}])).status,200);
+ const full=(await app.request('/api/workspace',{cookie:admin.cookie})).body;
+ const approved=structuredClone(full.data.sheets[0]);approved.status=approved.rows[0].status='approved';
+ assert.equal((await adminPatch([{collection:'sheets',id:approved.id,before:full.data.sheets[0],after:approved}])).status,200);
+ const locked=(await app.request('/api/workspace',{cookie:worker.cookie})).body.data.sheets[0];
+ const tampered=structuredClone(locked);tampered.rows[0].hours['2026-10-01']=4;
+ assert.equal((await employeePatch([{collection:'sheets',id:locked.id,before:locked,after:tampered}])).status,403);
+ const final=(await app.request('/api/workspace',{cookie:admin.cookie})).body.data;
+ assert.equal(final.settings.business,'Concurrent business');assert.equal(final.sheets[0].rows[0].hours['2026-10-01'],3);
+ // A conflict anywhere rolls back the complete request, including unrelated changes.
+ assert.equal((await adminPatch([{collection:'settings',id:'business',before:'Concurrent business',after:'Must roll back'},{collection:'sheets',id:locked.id,before:null,after:locked}])).status,409);
+ assert.equal((await app.request('/api/workspace',{cookie:admin.cookie})).body.data.settings.business,'Concurrent business');
+});

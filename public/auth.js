@@ -1,4 +1,5 @@
 let revision = 0, pendingSaves = 0, saveFailure = '', saveQueue = Promise.resolve();
+let saveBaseline=null,refreshInFlight=false,queuedWrites=[];
 let authMode = 'login', signedInUser = null, accountEmailEnabled = false, publicRegistration = false;
 let resetToken = new URLSearchParams(location.hash.slice(1)).get('reset') || '';
 let inviteToken = new URLSearchParams(location.hash.slice(1)).get('invite') || '';
@@ -54,7 +55,7 @@ async function loadWorkspace() {
   state = accountRole === 'admin' ? upgradeWorkspace(result.data) : result.data;
   protectedEmployees = (result.memberEmployeeIds || []).map(id => state.employees.find(e => e.id === id)).filter(Boolean);
   workspaces = await api('/api/workspaces');
-  revision = result.revision;
+  revision = result.revision;saveBaseline=structuredClone(state);
   role = accountRole; employeeId = linkedEmployeeId;
   period = periodFor(today()); week = 0; view = accountRole === 'admin' ? 'overview' : 'timesheets';
   pendingSaves = 0; saveFailure = ''; storageOK = true;
@@ -95,22 +96,107 @@ function saveLabel() {
   return saveFailure ? 'Unsaved changes · export a backup' : pendingSaves ? 'Saving…' : 'Saved to server';
 }
 
-function persistWorkspace() {
-  if (saveFailure) { toast('Changes are not saving. Export a backup and reload.'); return; }
-  const snapshot = JSON.parse(JSON.stringify(state));
-  pendingSaves++;
-  saveQueue = saveQueue.then(async () => {
-    try {
-      if (saveFailure) return;
-      const result = await api(accountRole === 'admin' ? '/api/workspace' : '/api/employee/timesheets', { method: 'PUT', body: JSON.stringify(accountRole === 'admin' ? { data: snapshot, revision } : { sheets: snapshot.sheets, revision }) });
-      revision = result.revision;
-    } catch (error) {
-      saveFailure = error.message; storageOK = false;
-      showModal('Your changes could not be saved', `<p role="alert">${esc(error.message)}</p><p style="margin-top:12px">Export your changes before reloading. The server copy has not been overwritten.</p>`, '<button onclick="exportBackup()">Export backup</button><button onclick="location.reload()">Reload server copy</button>');
-    } finally { pendingSaves--; updateStorageLabel(); }
-  });
-  updateStorageLabel();
+const syncEqual=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+function recordChanges(before,after){
+ const changes=[];
+ for(const collection of accountRole==='admin'?['employees','contracts','sheets','invoices']:['sheets']){
+  const old=new Map((before[collection]||[]).map(record=>[record.id,record])),next=new Map((after[collection]||[]).map(record=>[record.id,record]));
+  for(const id of new Set([...old.keys(),...next.keys()])){
+   const a=old.get(id)||null,b=next.get(id)||null;
+   if(!syncEqual(a,b))changes.push({collection,id,before:a,after:b});
+  }
+ }
+ if(accountRole==='admin')for(const collection of ['settings','metadata']){
+  const a=collection==='settings'?before.settings:{demo:before.demo,version:before.version},b=collection==='settings'?after.settings:{demo:after.demo,version:after.version};
+  for(const id of new Set([...Object.keys(a),...Object.keys(b)]))if(!syncEqual(a[id]??null,b[id]??null))changes.push({collection,id,before:a[id]??null,after:b[id]??null});
+ }
+ return structuredClone(changes);
 }
+function syncIdle(){return !document.hidden&&!pendingSaves&&!saveFailure&&!document.querySelector('.modal,[data-sync-dirty]')&&!document.activeElement?.matches('input,select,textarea,[contenteditable=true]')}
+function reconcileSaved(snapshot,remote){
+ // Pending local edits stay in place; only untouched records accept the server copy.
+ for(const change of recordChanges(snapshot,remote)){
+  const {collection,id,before,after}=change;
+  if(['settings','metadata'].includes(collection)){
+   const target=collection==='settings'?state.settings:state;
+   if(syncEqual(target[id]??null,before)){if(after===null)delete target[id];else target[id]=after}
+  }else{
+   const index=state[collection].findIndex(record=>record.id===id),value=index<0?null:state[collection][index];
+   if(!syncEqual(value,before))continue;
+   if(after===null){if(index>=0)state[collection].splice(index,1)}else if(index<0)state[collection].push(after);else state[collection][index]=after;
+  }
+ }
+ saveBaseline=structuredClone(state);
+}
+// Carry server-derived fields (for example locked labor categories) through rapid queued edits.
+function rebaseNormalized(base,local,remote){
+ if(syncEqual(base,local))return remote===undefined?undefined:structuredClone(remote);
+ if(!base||!local||!remote||typeof base!=='object'||typeof local!=='object'||typeof remote!=='object')return local;
+ if(Array.isArray(base)){
+  if(!Array.isArray(local)||!Array.isArray(remote)||![...base,...local,...remote].every(x=>x&&typeof x==='object'&&x.id))return local;
+  return local.map(item=>rebaseNormalized(base.find(x=>x.id===item.id),item,remote.find(x=>x.id===item.id)));
+ }
+ const result={...local};
+ for(const key of new Set([...Object.keys(base),...Object.keys(remote)])){
+  const value=rebaseNormalized(base[key],local[key],remote[key]);
+  if(value===undefined)delete result[key];else result[key]=value;
+ }
+ return result;
+}
+function normalizeQueuedSave(write,remote){
+ for(const change of write.changes){
+  if(!['employees','contracts','sheets','invoices'].includes(change.collection)||change.after===null)continue;
+  const normalized=remote[change.collection].find(record=>record.id===change.id);
+  if(!normalized||syncEqual(change.after,normalized))continue;
+  const normalize=value=>rebaseNormalized(change.after,value,normalized);
+  const localIndex=state[change.collection].findIndex(record=>record.id===change.id);
+  if(localIndex>=0)state[change.collection][localIndex]=normalize(state[change.collection][localIndex]);
+  for(const queued of queuedWrites){
+   if(queued===write)continue;
+   for(const next of queued.changes)if(next.collection===change.collection&&next.id===change.id){next.before=normalize(next.before);if(next.after!==null)next.after=normalize(next.after)}
+   const index=queued.snapshot[change.collection].findIndex(record=>record.id===change.id);
+   if(index>=0)queued.snapshot[change.collection][index]=normalize(queued.snapshot[change.collection][index]);
+  }
+ }
+ saveBaseline=structuredClone(state);
+}
+function persistWorkspace() {
+ if(saveFailure){toast('Changes are not saving. Export a backup and reload.');return}
+ const snapshot=structuredClone(state),changes=recordChanges(saveBaseline||snapshot,snapshot),requestedWorkspace=workspaceId;
+ const write={snapshot,changes};queuedWrites.push(write);
+ saveBaseline=structuredClone(snapshot);pendingSaves++;
+ saveQueue=saveQueue.then(async()=>{
+  try{
+   if(saveFailure||requestedWorkspace!==workspaceId)return;
+   if(changes.length){
+    const result=await api(accountRole==='admin'?'/api/workspace':'/api/employee/timesheets',{method:'PATCH',body:JSON.stringify({changes})});
+    revision=result.revision;normalizeQueuedSave(write,result.data);
+    // Avoid changing an open form or an input that has not fired its change event.
+    if(!document.querySelector('.modal,[data-sync-dirty]')&&!document.activeElement?.matches('input,select,textarea'))reconcileSaved(snapshot,result.data);
+   }
+  }catch(error){
+   saveFailure=error.message;storageOK=false;
+   showModal('Your changes could not be saved',`<p role="alert">${esc(error.message)}</p><p style="margin-top:12px">Export your changes before reloading. The server copy has not been overwritten.</p>`,'<button onclick="exportBackup()">Export backup</button><button onclick="location.reload()">Reload server copy</button>');
+  }finally{queuedWrites=queuedWrites.filter(item=>item!==write);pendingSaves--;updateStorageLabel()}
+ });
+ updateStorageLabel();
+}
+async function refreshWorkspaceIfIdle(){
+ if(refreshInFlight||!workspaceId||!syncIdle()||!syncEqual(state,saveBaseline))return;
+ const requestedWorkspace=workspaceId,requestedRevision=revision,baseline=structuredClone(state);refreshInFlight=true;
+ try{
+  const result=await api('/api/workspace');
+  if(requestedWorkspace!==workspaceId||requestedRevision!==revision||!syncIdle()||!syncEqual(state,baseline))return;
+  if(result.role!==accountRole){await loadWorkspace();return}
+  if(result.revision!==revision||!syncEqual(state,result.data)){state=result.data;revision=result.revision;saveBaseline=structuredClone(state);protectedEmployees=(result.memberEmployeeIds||[]).map(id=>state.employees.find(e=>e.id===id)).filter(Boolean);render()}
+ }catch{/* Leave existing data and edits intact; retry on the next idle refresh. */}
+ finally{refreshInFlight=false}
+}
+document.addEventListener('input',event=>event.target.closest('form')?.setAttribute('data-sync-dirty','true'));
+document.addEventListener('submit',event=>{const form=event.target;queueMicrotask(()=>{if(pendingSaves)form.removeAttribute('data-sync-dirty')})});
+setInterval(refreshWorkspaceIfIdle,20000);
+window.addEventListener('focus',refreshWorkspaceIfIdle);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshWorkspaceIfIdle()});
 
 async function logout() {
   await saveQueue;
