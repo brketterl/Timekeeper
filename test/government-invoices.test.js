@@ -153,3 +153,22 @@ test('API creates same-number replacements and retains the original voided invoi
  current.data.invoices[0].voided.reason='Changed history';
  assert.equal((await f.request('/api/workspace',f.owner.cookie,{data:current.data,revision:current.revision},'PUT')).status,409);
 });
+
+test('invoice creation ignores unrelated saves but checks the billing data shown to the user',async t=>{
+ const f=await fixture(t),doc=(await f.request('/api/workspace',f.owner.cookie)).body,d=data();
+ const employee=doc.data.employees[0];d.employees[0]={...employee,contracts:['contract']};d.contracts[0].billing.assignments[0].employeeId=employee.id;
+ sheet(d,'may','2026-05-01',8);d.sheets[0].employeeId=employee.id;
+ assert.equal((await f.request('/api/workspace',f.owner.cookie,{data:d,revision:doc.revision},'PUT')).status,200);
+ const {governmentInvoiceBasis}=await import('../public/billing.js');
+ const base=(await f.request('/api/workspace',f.owner.cookie)).body,request={...input('2026-05'),revision:base.revision,basis:governmentInvoiceBasis(base.data,input('2026-05'))};
+ const other=structuredClone(base.data.sheets[0]);other.id='june';other.start='2026-06-01';other.rows[0].id='june-row';other.rows[0].hours={'2026-06-01':2};
+ assert.equal((await f.request('/api/workspace',f.owner.cookie,{changes:[{collection:'sheets',id:other.id,before:null,after:other}]},'PATCH')).status,200);
+ assert.equal((await f.request('/api/invoices/government',f.owner.cookie,request)).status,200);
+ let current=(await f.request('/api/workspace',f.owner.cookie)).body;
+ current.data.invoices[0].sentDate='2026-05-31';assert.equal((await f.request('/api/workspace',f.owner.cookie,{data:current.data,revision:current.revision},'PUT')).status,200);
+ current=(await f.request('/api/workspace',f.owner.cookie)).body;
+ const june={...input('2026-06'),revision:current.revision,basis:governmentInvoiceBasis(current.data,input('2026-06'))};
+ const signers=structuredClone(current.data.settings.invoiceSigners);signers[0].name='Updated signer';
+ assert.equal((await f.request('/api/workspace',f.owner.cookie,{changes:[{collection:'settings',id:'invoiceSigners',before:current.data.settings.invoiceSigners,after:signers}]},'PATCH')).status,200);
+ const blocked=await f.request('/api/invoices/government',f.owner.cookie,june);assert.equal(blocked.status,409);assert.match(blocked.body.error,/billing setup/);
+});

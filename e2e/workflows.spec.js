@@ -581,3 +581,45 @@ test('mobile day entry validates hours, preserves dates and grid data, and handl
  const doc=await (await page.request.get('/api/workspace')).json();expect(doc.data.sheets.find(s=>s.id==='mobile-leap').rows[0].hours['2028-02-29']).toBe(4);
  await page.reload();await expect(page.getByRole('navigation')).toBeVisible();const persisted=await (await page.request.get('/api/workspace')).json();expect(persisted.data.sheets.find(s=>s.id==='s1').rows[0].hours[day]).toBe(8.25);
 });
+
+test('two users save separate timesheets and only same-timesheet edits conflict',async({page,browser})=>{
+ await page.goto('/');await register(page,'Concurrent admin',email('concurrent-admin'));
+ await page.evaluate(()=>{state=retainAccounts(seed());const sheet=state.sheets.find(s=>s.id==='s2');sheet.status='draft';sheet.rows.forEach(r=>r.status='draft');save();render()});await saved(page);
+ const context=await browser.newContext(),partner=await context.newPage();
+ await partner.goto(await invite(page,email('concurrent-partner'),'admin'));
+ // The invitation email is prefilled on the registration form.
+ const address=await partner.getByLabel('Email',{exact:true}).inputValue();
+ await register(partner,'Concurrent partner',address);
+ await page.evaluate(()=>openSheet('e1',periodFor(today())));
+ await partner.evaluate(()=>openSheet('e2',periodFor(today())));
+ await page.evaluate(()=>{const s=currentSheet();s.rows[0].hours[s.start]=9;save()});await saved(page);
+ await partner.evaluate(()=>{const s=currentSheet();s.rows[0].hours[s.start]=5;save()});await saved(partner);
+ let doc=(await (await page.request.get('/api/workspace')).json()).data;
+ expect(doc.sheets.find(s=>s.id==='s1').rows[0].hours[doc.sheets.find(s=>s.id==='s1').start]).toBe(9);
+ expect(doc.sheets.find(s=>s.id==='s2').rows[0].hours[doc.sheets.find(s=>s.id==='s2').start]).toBe(5);
+ // Idle refresh updates other records without changing the selected timesheet.
+ await page.bringToFront();
+ await page.evaluate(async()=>{document.activeElement?.blur();await refreshWorkspaceIfIdle()});
+ expect(await page.evaluate(()=>state.sheets.find(s=>s.id==='s2').rows[0].hours[state.sheets.find(s=>s.id==='s2').start])).toBe(5);
+ expect(await page.evaluate(()=>employeeId)).toBe('e1');
+ // A blurred, unsaved form must also be protected from automatic refresh.
+ await page.locator('nav button[title=Settings]').click();
+ await page.locator('input[name=business]').fill('Unsaved business draft');
+ await page.evaluate(()=>document.activeElement?.blur());
+ const beforeSettings=await (await partner.request.get('/api/workspace')).json();
+ const updated=await partner.request.patch('/api/workspace',{headers:{Origin:'http://127.0.0.1:3100'},data:{changes:[{collection:'settings',id:'email',before:beforeSettings.data.settings.email,after:'concurrent-billing@example.test'}]}});expect(updated.status()).toBe(200);
+ await page.evaluate(()=>refreshWorkspaceIfIdle());
+ await expect(page.locator('input[name=business]')).toHaveValue('Unsaved business draft');
+ expect(await page.evaluate(()=>state.settings.email)).not.toBe('concurrent-billing@example.test');
+ await page.locator('nav button[title=Timesheets]').click();await page.evaluate(async()=>{document.activeElement?.blur();await refreshWorkspaceIfIdle()});
+ expect(await page.evaluate(()=>state.settings.email)).toBe('concurrent-billing@example.test');
+ // Both users now start with the same sheet, then edit it independently.
+ for(const client of [page,partner])await client.evaluate(async()=>{await loadWorkspace();openSheet('e1',periodFor(today()))});
+ await page.evaluate(()=>{const s=currentSheet();s.rows[0].hours[s.start]=10;save()});await saved(page);
+ await partner.evaluate(()=>{const s=currentSheet();s.rows[0].hours[s.start]=11;save()});
+ await expect(partner.getByRole('dialog')).toContainText('Someone else changed this timesheet');
+ expect(await partner.evaluate(()=>currentSheet().rows[0].hours[currentSheet().start])).toBe(11);
+ doc=(await (await page.request.get('/api/workspace')).json()).data;
+ expect(doc.sheets.find(s=>s.id==='s1').rows[0].hours[doc.sheets.find(s=>s.id==='s1').start]).toBe(10);
+ await context.close();
+});

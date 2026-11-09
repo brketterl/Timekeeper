@@ -63,3 +63,11 @@ For a government invoice replacement, select the original billing month and ente
 The task-order chronology check ignores voided invoices and identifies the active invoice/month blocking an earlier billing month. Later active invoices still prevent inserting an earlier month because their cumulative snapshots must remain accurate.
 
 No schema migration is required. After saving a same-number replacement, older app versions that require every historical number to be unique cannot read that workspace; rollback must retain this validation fix.
+
+## Concurrent users and saving
+
+Normal saves now send only the records that changed (employees, contracts, timesheets, invoices, and individual settings fields). Within a database transaction, the server checks each changed record against the version that user edited, applies the changes to the latest workspace, and runs the existing permission, timesheet, invoice, and audit validation. Edits to different records can save together. Any conflict rejects the entire request and keeps the browser's unsaved work available for export. Two people editing different dates on the same timesheet still count as a same-record conflict.
+
+The UI refreshes server data every 20 seconds and on window focus when there are no queued saves, unsaved state changes, open dialogs, focused inputs, or dirty forms. It preserves the selected screen and period. Server-derived fields are carried through rapid queued saves. Government invoice creation checks its billing dependencies rather than rejecting an unrelated workspace revision change.
+
+Existing tabs must be reloaded once to use the new save behavior. Older clients and explicit workspace backup replacement still use strict revision checks. No database schema migration is required.

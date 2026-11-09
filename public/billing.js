@@ -63,6 +63,12 @@ export function nextNumber(data,c) {
   while(data.invoices.some(i=>i.number===prefix+String(n).padStart(padding,'0')))n++;
   return {number:prefix+String(n).padStart(padding,'0'),next:n+1};
 }
+// Dependencies shown in the invoice form. Unrelated workspace edits do not invalidate it.
+export function governmentInvoiceBasis(data,input){
+ const sheets=data.sheets.filter(s=>s.start.slice(0,7)===input.month).map(s=>({...s,rows:s.rows.filter(r=>r.contractId===input.contractId)})).filter(s=>s.rows.length);
+ const employees=new Set(sheets.map(s=>s.employeeId));
+ return {contract:data.contracts.find(c=>c.id===input.contractId)||null,settings:data.settings,signer:data.settings.invoiceSigners?.find(s=>s.id===input.signerId)||null,sheets,employees:data.employees.filter(e=>employees.has(e.id)),invoices:data.invoices.filter(i=>i.contractId===input.contractId&&(!i.government||i.government.taskOrderId===input.taskOrderId))};
+}
 export function governmentInvoice(data,input,invoiceId) {
   const c=data.contracts.find(c=>c.id===input.contractId),b=c?.billing;
   if(!c||!isGovernment(c)||b?.template!=='government')throw Error('Complete government invoice setup for this contract first.');
