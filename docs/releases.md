@@ -81,3 +81,15 @@ GitHub Actions failures include a browser report artifact for troubleshooting. A
 ## Rollback
 
 Record the previously deployed production commit before release. If only code changed, manually redeploy that commit and verify the app. Database migrations or data writes are not undone by reverting code. A schema-changing release needs a specific recovery plan and a verified database backup before it is approved.
+
+## Authorized one-way business-data refresh
+
+For manual staging review with real business records, use production **Settings → Export workspace backup**, then staging **Settings → Refresh staging from production export**. This copies only the exported workspace document, not the production SQLite database, users, password hashes, sessions, invitations, notification queues, audit log, environment variables, or provider credentials. Do not commit the export or use it in automated tests.
+
+The tool requires `STAGING_DATA_REFRESH_ENABLED=true` and the exact hosted staging origin. Production remains disabled. On the existing manually configured Render staging service, keep `AUTH_EMAIL_ENABLED=false`, `TIMESHEET_EMAIL_ENABLED=false`, `BACKUP_ALERTS_ENABLED=false`, and `BACKUP_ENABLED=false`. Existing integration secrets are left untouched and unused. Startup refuses the refresh feature alongside outgoing account/timesheet email or external backup integrations. Do not enable these flags on production. These are explicit service overrides; the separate sample staging Blueprint does not enable the tool automatically.
+
+The operator chooses the production workspace JSON file and reviews the record counts before replacement. A JSON backup of the old staging workspace is written privately to `DATA_DIR/staging-refresh-backups` before the transaction writes the replacement; a backup download is also initiated in the browser. A backup failure aborts the refresh. Keep downloaded exports private and remove local copies when no longer needed. These local staging backups are not automatically uploaded or pruned; retain the needed rollback copy and manage disk space before repeated refreshes. Restore the saved staging JSON using the ordinary Restore from backup action if necessary.
+
+Linked staging employees are preserved by matching email and retaining staging employee IDs. Production employees without a linked staging account receive new employee IDs; timesheets, contract category assignments, and government invoice references are remapped together. Linked test accounts absent from the production export are kept active with no assigned contracts. Matching linked test accounts stay active so sign-in continues. Production names, hours, rates, invoice numbers, payment history, and billing snapshots are retained; authentication accounts and credentials are never imported.
+
+This is a manual snapshot, not a background sync. Later staging edits never update production, and later production edits require another explicit refresh. The source export comes from the browser's saved workspace view; ensure production has no unsaved edits, reload its latest server copy, then export.
