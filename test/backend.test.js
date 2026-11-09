@@ -492,22 +492,24 @@ test('approval queue includes mixed and older sheets, isolates workspaces and pr
  const save=()=>app.request('/api/workspace',{method:'PUT',cookie:admin.cookie,data:{data:doc.data,revision:doc.revision}});
  const reload=async()=>{doc=(await app.request('/api/workspace',{cookie:admin.cookie})).body};
  const queue=async()=> (await app.request('/api/approvals',{cookie:admin.cookie})).body.entries;
- assert.equal((await save()).status,200);await reload();
+ assert.equal((await app.request('/api/workspace/import',{method:'POST',cookie:admin.cookie,data:{data:doc.data,revision:doc.revision}})).status,200);await reload();
  const db=new DatabaseSync(join(app.directory,'timekeeper.sqlite'));t.after(()=>db.close());
  const oldDate=Date.now()-5*86400000,newDate=Date.now()-86400000;
  // Append fixture events; the audit log's no-update/no-delete protection stays enabled.
- const appendSubmission=(sheetId,date,legacy=false)=>db.prepare(`INSERT INTO audit_events(workspace_id,actor_id,actor_name,actor_role,event_type,entity_id,summary,details,created_at)
-   SELECT workspace_id,actor_id,actor_name,actor_role,event_type,entity_id,summary,CASE WHEN ? THEN json_remove(details,'$.rowIds') ELSE details END,? FROM audit_events WHERE entity_id=? AND event_type='timesheet.submitted' ORDER BY id DESC LIMIT 1`).run(Number(legacy),date,sheetId);
+ const appendSubmission=(sheetId,date,legacy=false)=>{
+  const rowIds=doc.data.sheets.find(s=>s.id===sheetId).rows.filter(r=>r.status==='submitted').map(r=>r.id);
+  db.prepare(`INSERT INTO audit_events(workspace_id,actor_id,actor_name,actor_role,event_type,entity_id,summary,details,created_at) VALUES(?,?,?,'admin','timesheet.submitted',?,'Fixture submission',?,?)`).run(doc.workspaceId,admin.body.user.id,'Owner',sheetId,JSON.stringify({employeeId:'worker',...(!legacy?{rowIds}:{})}),date);
+ };
  appendSubmission('old-pending',oldDate);appendSubmission('new-pending',newDate);
  let entries=await queue();assert.deepEqual(entries.map(e=>e.sheetId),['old-pending','new-pending']);assert.equal(entries[0].submittedHours,2);assert.equal(entries[0].submittedRows,1);assert.equal(entries[0].submittedAt,oldDate);
  assert.equal((await app.request('/api/approvals',{cookie:worker.cookie})).status,403);
  const outsider=await app.request('/api/auth/register',{method:'POST',data:{...account,email:'queue-outsider@example.test'}});
  assert.deepEqual((await app.request('/api/approvals?workspaceId=forged',{cookie:outsider.cookie})).body.entries,[]);
- doc.data.sheets[0].rows[2].status='submitted';doc.data.sheets[0].status='submitted';assert.equal((await save()).status,200);await reload();
- entries=await queue();assert.equal(entries[0].submittedHours,3);assert.equal(entries[0].submittedAt,oldDate);
- doc.data.sheets[0].rows[1].status='approved';assert.equal((await save()).status,200);await reload();
- entries=await queue();assert.ok(entries[0].submittedAt>newDate);
- doc.data.sheets[0].rows[2].status='draft';doc.data.sheets[0].rows[2].feedback=['Clarify this entry'];doc.data.sheets[0].status='draft';assert.equal((await save()).status,200);await reload();
+ // Older clients cannot partially submit or approve a historical mixed sheet.
+ doc.data.sheets[0].rows[2].status='submitted';doc.data.sheets[0].status='submitted';assert.equal((await save()).status,409);await reload();
+ doc.data.sheets[0].rows[1].status='approved';assert.equal((await save()).status,409);await reload();
+ for(const row of doc.data.sheets[0].rows){if(row.status!=='draft')row.feedback=['Review this whole timesheet'];row.status='draft'}
+ doc.data.sheets[0].status='draft';assert.equal((await save()).status,200);await reload();
  assert.deepEqual((await queue()).map(e=>e.sheetId),['new-pending']);
  appendSubmission('new-pending',newDate,true);
  assert.equal((await queue())[0].submittedAt,null);
@@ -526,4 +528,25 @@ test('standard drafts accept selected approved sources and edits without double 
  doc.data.invoices.push({...structuredClone(draft),id:'other-draft',number:'SEL-2'});assert.equal((await save(doc.data)).status,200);await reload();
  doc.data.invoices[0].sentDate='2026-10-02';assert.equal((await save(doc.data)).status,200);await reload();
  doc.data.invoices[0].note='Cannot change sent invoice';assert.equal((await save(doc.data)).status,409);
+});
+
+
+test('whole timesheets reject partial submissions, withdrawals, approvals and locked row additions', async t=>{
+ const {app,admin,worker}=await setupShared(t);
+ let doc=(await app.request('/api/workspace',{cookie:worker.cookie})).body;
+ const sheet={id:'whole-sheet',employeeId:'worker',start:'2026-10-01',status:'draft',rows:[1,2].map(n=>({id:'whole-row-'+n,contractId:'assigned',status:'draft',hours:{'2026-10-01':n},note:''}))};
+ const save=()=>app.request('/api/employee/timesheets',{method:'PUT',cookie:worker.cookie,data:{sheets:[sheet],revision:doc.revision}});
+ assert.equal((await save()).status,200);doc=(await app.request('/api/workspace',{cookie:worker.cookie})).body;
+ sheet.rows[0].status='submitted';assert.equal((await save()).status,409);
+ sheet.rows.forEach(r=>r.status='submitted');sheet.status='submitted';assert.equal((await save()).status,200);doc=(await app.request('/api/workspace',{cookie:worker.cookie})).body;
+ sheet.rows[0].status='draft';sheet.status='draft';assert.equal((await save()).status,409);
+ sheet.rows[0].status='submitted';sheet.status='submitted';sheet.rows.push({id:'extra',contractId:'assigned',status:'submitted',hours:{},note:''});assert.equal((await save()).status,403);sheet.rows.pop();
+ let full=(await app.request('/api/workspace',{cookie:admin.cookie})).body;
+ full.data.sheets[0].rows[0].status='approved';
+ assert.equal((await app.request('/api/workspace',{method:'PUT',cookie:admin.cookie,data:{data:full.data,revision:full.revision}})).status,409);
+ full.data.sheets[0].rows.forEach(r=>r.status='approved');full.data.sheets[0].status='approved';
+ assert.equal((await app.request('/api/workspace',{method:'PUT',cookie:admin.cookie,data:{data:full.data,revision:full.revision}})).status,200);
+ doc=(await app.request('/api/workspace',{cookie:worker.cookie})).body;
+ sheet.rows.forEach(r=>r.status='approved');sheet.status='approved';sheet.rows.push({id:'extra',contractId:'assigned',status:'draft',hours:{},note:''});sheet.status='draft';
+ assert.equal((await save()).status,409);
 });

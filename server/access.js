@@ -11,6 +11,25 @@ const rowView = r => ({ id: r.id, contractId: r.contractId, status: r.status, ho
 const sheetView = s => ({ id: s.id, employeeId: s.employeeId, start: s.start, status: s.status, rows: s.rows.map(rowView) });
 const equal = isDeepStrictEqual;
 
+// Keep historical mixed sheets readable; changes must transition the whole period.
+function validateSheetTransition(old, sheet, role) {
+  if(sheet.rows.some(r=>!r||typeof r!=='object'))throw fail(400,'Invalid time entry fields.');
+  if(old&&equal(sheetView(old),sheetView(sheet)))return;
+  if(new Set(sheet.rows.map(r=>r.status)).size>1)throw fail(409,'Submit, approve, or return the whole timesheet together.');
+  if(!old)return;
+  const locked=old.rows.some(r=>r.status!=='draft');
+  if(!locked)return;
+  if(new Set(old.rows.map(r=>r.status)).size>1&&!(role==='admin'&&sheet.rows.every(r=>r.status==='draft')))throw fail(409,'Return this older mixed-status timesheet as a whole before editing.');
+  if(old.status==='approved'&&sheet.rows.some(r=>r.status==='submitted'))throw fail(409,'Return approved timesheets before resubmitting.');
+  if(old.rows.length!==sheet.rows.length)throw fail(403,'Locked timesheets cannot have rows added or removed.');
+  for(const previous of old.rows){
+    const row=sheet.rows.find(r=>r.id===previous.id);
+    const entry=r=>{const {status,feedback,...rest}=rowView(r);return rest};
+    if(!row||!equal(entry(previous),entry(row)))throw fail(403,'Withdraw or return the whole timesheet before editing.');
+  }
+  if(role==='employee'&&old.rows.some(r=>r.status==='approved'))throw fail(403,'Approved timesheets are locked.');
+}
+
 export function accessStore(db, { onAuditEvent, notificationStatus, retryNotifications } = {}) {
   const audit = auditStore(db, { onEvent: onAuditEvent });
   const log = (session, type, id, summary, details) => audit.record(session.workspace_id, session.user_id, type, id, summary, details);
@@ -91,6 +110,7 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
         if (!employee?.active || employee.email.toLowerCase() !== member.email.toLowerCase()) throw fail(409, 'Keep linked account employee records active with their account email. Remove workspace access first to archive an employee.');
       }
       const before = document(session.workspace_id).data;
+      if(!restore)for(const sheet of input.data.sheets)validateSheetTransition(before.sheets.find(s=>s.id===sheet.id),sheet,'admin');
       for (const old of restore ? [] : before.invoices) {
         const incoming = input.data.invoices.find(i=>i.id===old.id);
         const snapshot=invoice=>{const {payments,voided,...rest}=invoice;return rest};
@@ -137,6 +157,7 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       const incoming = input.sheets.map(s => {
         if (!s || Object.keys(s).some(k => !['id', 'employeeId', 'start', 'status', 'rows'].includes(k)) || s.employeeId !== employee.id || !Array.isArray(s.rows)) throw fail(403, 'Only your own timesheets may be changed.');
         const old = oldSheets.find(x => x.id === s.id);
+        validateSheetTransition(old,s,'employee');
         if (old && old.start !== s.start) throw fail(403, 'Timesheet dates cannot be changed.');
         if (old?.rows.some(r => r.status !== 'draft' && !s.rows.some(row => row.id === r.id))) throw fail(403, 'Locked rows cannot be removed.');
         const rows = s.rows.map(r => {

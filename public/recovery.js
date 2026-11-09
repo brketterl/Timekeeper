@@ -39,7 +39,7 @@ let undoRemovedRow=null;
 function offerRowUndo(original,row,index){
  undoRemovedRow=()=>{
   const sheet=state.sheets.find(s=>s.employeeId===original.employeeId&&s.start===original.start)||{...original,rows:[]};
-  if(!employee(original.employeeId)?.active||sheet.rows.some(r=>r.id===row.id)||Object.entries(row.hours).some(([date,value])=>sum(sheet.rows.map(r=>r.hours[date]||0))+value>24)||(!isOwner()&&(!contract(row.contractId)?.active||!employee(original.employeeId).contracts.includes(row.contractId))))return toast('The timesheet changed. Add the row again to restore its hours.');
+  if(!editableSheet(sheet)||!employee(original.employeeId)?.active||sheet.rows.some(r=>r.id===row.id)||Object.entries(row.hours).some(([date,value])=>sum(sheet.rows.map(r=>r.hours[date]||0))+value>24)||(!isOwner()&&(!contract(row.contractId)?.active||!employee(original.employeeId).contracts.includes(row.contractId))))return toast('The timesheet changed. Add the row again to restore its hours.');
   if(!state.sheets.includes(sheet))state.sheets.push(sheet);sheet.rows.splice(index,0,row);refreshSheet(sheet);save();render();toast('Draft row restored');
  };
  clearTimeout(toastTimer);document.getElementById('toast').innerHTML='<div class="toast">Draft row removed. <button onclick="const undo=undoRemovedRow;undoRemovedRow=null;undo?.()">Undo</button></div>';toastTimer=setTimeout(()=>document.getElementById('toast').innerHTML='',10000);
@@ -58,9 +58,9 @@ function rowFeedback(row){
 function returnWithFeedback(rowIds){
  const sheet=currentSheet();if(!isOwner()||!sheet||!employee(sheet.employeeId).active||!rowIds.length)return;
  const rows=sheet.rows.filter(row=>rowIds.includes(row.id));
- if(rows.length!==rowIds.length||rows.some(row=>!['approved','submitted'].includes(row.status)||billed(sheet,row)))return;
+ if(rows.length!==sheet.rows.length||rows.length!==rowIds.length||!rows.some(row=>row.status!=='draft')||rows.some(row=>billed(sheet,row)))return;
  feedbackReturn={sheetId:sheet.id,rows:rows.map(row=>({id:row.id,status:row.status}))};
- showModal('Return hours for changes',`<form id="feedback-form" onsubmit="event.preventDefault();saveReturnFeedback(this)"><div id="form-error"></div><p class="note">${rows.length===1?'Only this row will return to draft.':`These ${rows.length} rows will return to draft with the same feedback.`} Hours and work notes will be kept. Resubmission and approval are required before invoicing.</p><ul>${rows.map(row=>`<li>${esc(contract(row.contractId).name)} · ${hours(rowHours(row))} hours</li>`).join('')}</ul><label>What needs to change?<textarea name="reason" maxlength="500" required placeholder="For example: Move Tuesday’s 2 hours to the correct project and explain the work performed."></textarea></label><small>The employee will see this beside each affected row. Earlier feedback stays in history.</small></form>`,`<button onclick="closeModal()">Cancel</button><button class="primary" type="submit" form="feedback-form">Return to draft</button>`);
+ showModal('Return timesheet for changes',`<form id="feedback-form" onsubmit="event.preventDefault();saveReturnFeedback(this)"><div id="form-error"></div><p class="note">The whole timesheet will return to draft with the same feedback. Hours and work notes will be kept. Resubmission and approval are required before invoicing.</p><ul>${rows.map(row=>`<li>${esc(contract(row.contractId).name)} · ${hours(rowHours(row))} hours</li>`).join('')}</ul><label>What needs to change?<textarea name="reason" maxlength="500" required placeholder="For example: Move Tuesday’s 2 hours to the correct project and explain the work performed."></textarea></label><small>The employee will see this on their timesheet. Earlier feedback stays in history.</small></form>`,`<button onclick="closeModal()">Cancel</button><button class="primary" type="submit" form="feedback-form">Return timesheet</button>`);
 }
 function saveReturnFeedback(form){
  if(!isOwner()||!feedbackReturn)return;
@@ -68,6 +68,6 @@ function saveReturnFeedback(form){
  const sheet=state.sheets.find(s=>s.id===feedbackReturn.sheetId),rows=feedbackReturn.rows.map(old=>sheet?.rows.find(row=>row.id===old.id&&row.status===old.status));
  if(!sheet||!employee(sheet.employeeId).active||rows.some(row=>!row||billed(sheet,row)))return formError('These rows changed. Close this dialog and review the latest timesheet.');
  if(rows.some(row=>(row.feedback||[]).length>=100))return formError('This row has reached its feedback history limit. Keep it for history and create a new row.');
- for(const row of rows){row.feedback=[...(row.feedback||[]),reason];row.status='draft'}
- refreshSheet(sheet);feedbackReturn=null;save();closeModal();render();toast('Hours returned with correction feedback');
+ for(const row of rows){if(row.status!=='draft')row.feedback=[...(row.feedback||[]),reason];row.status='draft'}
+ refreshSheet(sheet);feedbackReturn=null;save();closeModal();render();toast('Timesheet returned with correction feedback');
 }

@@ -45,3 +45,12 @@ At widths up to 900 pixels, Timesheets defaults to Day view. Use the date picker
 Changing views or rotating the device keeps recorded hours. The same quarter-hour increments, 24-hour combined daily limit, task-order date rules, and submitted/approved locks apply. Work notes cover the entire contract row for the period. Submit draft hours submits all draft rows in the period, including other dates; it is not a one-day submission.
 
 Menu opens labeled navigation and account actions on small screens, and closes after choosing a page or pressing Escape. Employees see their permitted Timesheets and Contracts pages. All these changes use the existing workspace data and require no database migration.
+
+
+## Staging trial: whole timesheets
+
+Submission, withdrawal, approval, and return now cover every row in the semi-monthly period. Submitted and approved sheets cannot accept additional rows or edits. An admin can return an unbilled sheet with a required reason; existing row feedback is retained. The UI shows returned drafts as Returned until resubmission. Billing can still select approved hours by contract or task order.
+
+Legacy mixed-status sheets remain readable and retain their billing sources. An admin must return all rows together before further editing. A sheet containing invoiced hours cannot be reopened; its records remain available for review. Restoring a workspace backup preserves historical mixed states rather than rewriting them.
+
+For review on staging, try two contracts in one period: submit, withdraw, resubmit, return with feedback, correct hours, resubmit, and approve. Check both day and grid views and confirm every entry locks together. No database schema migration is needed for this trial.

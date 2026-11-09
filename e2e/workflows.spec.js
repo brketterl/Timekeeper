@@ -78,28 +78,27 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await worker.locator('input[type=number]').first().fill('8');
   await worker.locator('input[type=number]').first().press('Tab');
   await saved(worker);
-  await worker.getByRole('button', { name: 'Submit draft hours' }).click();
+  await worker.getByRole('button', { name: 'Submit timesheet' }).click();
   await saved(worker);
-  await expect(worker.getByRole('group', { name: 'Timesheet status by row' })).toHaveText('1 awaiting approval');
-  await expect(worker.getByRole('button', { name: 'Withdraw submitted hours', exact: true })).toBeVisible();
+  await expect(worker.getByRole('group', { name: 'Timesheet status' })).toHaveText('Submitted');
+  await expect(worker.getByRole('button', { name: 'Withdraw submission', exact: true })).toBeVisible();
   await expect.poll(async () => (await inboxEmails(page, adminEmail)).filter(email => email.subject.includes('submitted for review')).length).toBe(1);
-  await worker.getByRole('button', { name: 'Withdraw row', exact: true }).click();
-  await worker.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await worker.getByRole('button', { name: 'Withdraw submission', exact: true }).click();
   await saved(worker);
-  await expect(worker.locator('.mobile-time-entry .badge').first()).toHaveText('Draft');
+  await expect(worker.getByRole('group', { name: 'Timesheet status' })).toHaveText('Draft');
   await expect(worker.locator('input[type=number]').first()).toBeEnabled();
-  await worker.getByRole('button', { name: 'Submit draft hours', exact: true }).click();
+  await worker.getByRole('button', { name: 'Submit timesheet', exact: true }).click();
   await saved(worker);
 
 
   await page.reload();
   await page.getByRole('button', { name: 'Review', exact: true }).click();
-  await page.getByRole('button', { name: 'Return row for changes', exact: true }).click();
+  await page.getByRole('button', { name: 'Return timesheet for changes', exact: true }).click();
   await page.getByLabel('What needs to change?', { exact: true }).fill('   ');
-  await page.getByRole('button', { name: 'Return to draft', exact: true }).click();
+  await page.getByRole('button', { name: 'Return timesheet', exact: true }).click();
   await expect(page.locator('#form-error')).toContainText('Explain what needs to change.');
   await page.getByLabel('What needs to change?', { exact: true }).fill('Explain the work performed on the report.');
-  await page.getByRole('button', { name: 'Return to draft', exact: true }).click();
+  await page.getByRole('button', { name: 'Return timesheet', exact: true }).click();
   await saved(page);
   await worker.reload();
   await expect(worker.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Explain the work performed on the report.');
@@ -117,19 +116,19 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await worker.locator('#row-note').fill('Prepared the weekly progress report.');
   await worker.getByRole('button', { name: 'Save note', exact: true }).click();
   await saved(worker);
-  await worker.getByRole('button', { name: 'Submit draft hours', exact: true }).click();
+  await worker.getByRole('button', { name: 'Resubmit timesheet', exact: true }).click();
   await saved(worker);
   await expect(worker.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Resubmitted');
   await page.reload();
   await page.getByRole('button', { name: 'Review', exact: true }).click();
   await expect(page.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Explain the work performed on the report.');
-  await page.getByRole('button', { name: 'Approve submitted hours', exact: true }).click();
+  await page.getByRole('button', { name: 'Approve timesheet', exact: true }).click();
   await saved(page);
   await expect.poll(async () => (await inboxEmails(worker, workerEmail)).filter(email => email.subject.includes('hours were approved')).length).toBe(1);
   await worker.reload();
   await expect(worker.locator('input[type=number]').first()).toBeDisabled();
   await expect(worker.getByRole('button', { name: 'Reopen row', exact: true })).toHaveCount(0);
-  await expect(worker.getByText('Ask an admin to reopen this row for corrections.', { exact: true })).toBeVisible();
+  await expect(worker.getByRole('button', { name: 'Add contract', exact: true })).toHaveCount(0);
   await expect(worker.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Reviewer feedback history');
 
   const partnerEmail = email('partner');
@@ -337,115 +336,41 @@ test('government invoice setup creates a highlighted monthly PDF with locked cum
 });
 
 
-test('mixed timesheet statuses remain visible and actions only change their stated rows', async ({ page }, info) => {
-  await page.goto('/');
-  await register(page, 'Status reviewer', email('statuses'));
-  // Fixture lives only in the temporary e2e workspace, with the linked account retained.
-  await page.evaluate(() => {
-    state = retainAccounts(seed());
-    const sheet = state.sheets.find(s => s.id === 's1');
-    sheet.rows = ['approved', 'submitted', 'draft'].map((status, index) => ({
-      id: 'mixed-row-' + index, contractId: index === 1 ? 'c2' : 'c1',
-      rate: index === 1 ? 8500 : 12500, note: '', status, hours: { [sheet.start]: index + 1 }
-    }));
-    refreshSheet(sheet); save(); render();
-  });
-  await saved(page);
-  const overviewRow = page.locator('tbody tr').filter({ has: page.getByText('You', { exact: true }) });
-  await expect(overviewRow.getByRole('group', { name: 'Timesheet status by row' })).toHaveText('1 draft1 awaiting approval1 approved');
-  await overviewRow.getByRole('button', { name: 'Review', exact: true }).click();
-  const summary = page.getByRole('group', { name: 'Timesheet status by row' });
-  const rows = page.locator('.time-table tbody tr');
-  await page.screenshot({ path: info.outputPath('mixed-status-desktop.png'), fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: info.outputPath('mixed-status-mobile.png'), fullPage: true });
-  const bounds = await summary.boundingBox();
-  expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
-  await page.setViewportSize({ width: 1280, height: 720 });
-  await expect(rows.nth(0).locator('.badge')).toHaveText('Approved');
-  await expect(rows.nth(1).locator('.badge')).toHaveText('Awaiting approval');
-  await expect(rows.nth(2).locator('.badge')).toHaveText('Draft');
-  await expect(rows.nth(0).locator('input').first()).toBeDisabled();
-  await expect(rows.nth(2).locator('input').first()).toBeEnabled();
-  await page.getByRole('button', { name: 'Approve submitted hours', exact: true }).click();
-  await saved(page);
-  await expect(summary).toHaveText('1 draft2 approved');
-  await expect(rows.nth(2).locator('.badge')).toHaveText('Draft');
-  await page.getByRole('button', { name: 'Submit draft hours', exact: true }).click();
-  await saved(page);
-  await expect(summary).toHaveText('1 awaiting approval2 approved');
-  await page.getByRole('button', { name: 'Return submitted hours for changes', exact: true }).click();
-  await page.getByLabel('What needs to change?', { exact: true }).fill('Confirm the project assignment.');
-  await page.getByRole('button', { name: 'Return to draft', exact: true }).click();
-  await saved(page);
-  await expect(summary).toHaveText('1 draft2 approved');
-  await page.getByRole('button', { name: 'Submit draft hours', exact: true }).click();await saved(page);
-  await page.getByRole('button', { name: 'Return submitted hours for changes', exact: true }).click();
-  await page.getByLabel('What needs to change?', { exact: true }).fill('Also check the work date.');
-  await page.getByRole('button', { name: 'Return to draft', exact: true }).click();await saved(page);
-  await rows.nth(2).getByText('Earlier feedback (1)', { exact: true }).click();
-  await expect(rows.nth(2).getByRole('note', { name: 'Reviewer feedback' })).toContainText('Confirm the project assignment.');
-  await page.reload();
-  const persisted = await (await page.request.get('/api/workspace')).json();
-  expect(persisted.data.sheets.find(s => s.id === 's1').rows.map(r => r.status)).toEqual(['approved', 'approved', 'draft']);
-  await page.locator('nav button[title=Timesheets]').click();
-  await expect(page.getByRole('group', { name: 'Timesheet status by row' })).toHaveCount(0);
-  await expect(page.locator('.timesheet-heading')).toContainText('Not started');
-  await expect(page.getByRole('button', { name: 'Submit draft hours', exact: true })).toBeDisabled();
+test('whole timesheet submission, return, resubmission and approval lock every row', async ({page},info)=>{
+ await page.goto('/');await register(page,'Period reviewer',email('whole-sheet'));
+ await page.evaluate(()=>{state=retainAccounts(seed());save();openSheet('e1',periodFor(today()))});await saved(page);
+ const rows=page.locator('.time-table tbody tr');
+ await page.getByRole('button',{name:'Submit timesheet',exact:true}).click();await saved(page);
+ await expect(page.locator('.time-table input:enabled')).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'Add contract',exact:true})).toHaveCount(0);
+ await page.getByRole('button',{name:'Return timesheet for changes',exact:true}).click();
+ await page.getByLabel('What needs to change?',{exact:true}).fill('Check both projects.');
+ await page.getByRole('button',{name:'Return timesheet',exact:true}).click();await saved(page);
+ await expect(page.getByRole('group',{name:'Timesheet status'})).toHaveText('Returned');
+ await expect(rows.nth(0).locator('input').first()).toBeEnabled();await expect(rows.nth(1).locator('input').first()).toBeEnabled();
+ await page.getByRole('button',{name:'Resubmit timesheet',exact:true}).click();await saved(page);
+ await page.getByRole('button',{name:'Approve timesheet',exact:true}).click();await saved(page);
+ await expect(page.getByRole('group',{name:'Timesheet status'})).toHaveText('Approved');
+ await expect(page.locator('.time-table input:enabled')).toHaveCount(0);
+ await page.screenshot({path:info.outputPath('whole-timesheet-desktop.png'),fullPage:true});
+ await page.setViewportSize({width:390,height:844});
+ await expect(page.getByRole('group',{name:'Timesheet status'})).toHaveText('Approved');
+ await expect(page.locator('.mobile-time-entry input:enabled')).toHaveCount(0);
+ await page.screenshot({path:info.outputPath('whole-timesheet-mobile.png'),fullPage:true});
 });
 
-
-test('row corrections preserve neighboring and invoiced hours on a mixed timesheet', async ({ page }, info) => {
-  await page.goto('/');
-  await register(page, 'Correction reviewer', email('corrections'));
-  await page.evaluate(() => {
-    state = retainAccounts(seed());
-    const sheet = state.sheets.find(s => s.id === 'old0');
-    sheet.rows.push(...['approved', 'approved', 'submitted', 'draft'].map((status,index) => ({
-      id: 'correction-' + index, contractId: 'c1', rate: 12500, status,
-      note: 'Keep this work note ' + index, hours: { [sheet.start]: 1 }
-    })));
-    refreshSheet(sheet); save(); openSheet(sheet.employeeId,sheet.start);
-  });
-  await saved(page);
-  const rows = page.locator('.time-table tbody tr');
-  await expect(rows.nth(0)).toContainText('Locked on INV-1001');
-  await expect(rows.nth(0).getByRole('button', { name: 'Reopen row', exact: true })).toHaveCount(0);
-  await rows.nth(0).getByRole('button', { name: 'View invoice', exact: true }).click();
-  await expect(page.getByRole('dialog')).toContainText('INV-1001');
-  await page.getByRole('button', { name: 'Close dialog' }).click();
-  await rows.nth(1).getByRole('button', { name: 'Reopen row', exact: true }).click();
-  await expect(page.getByRole('dialog')).toContainText('Only this row will return to draft');
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await expect(rows.nth(1).locator('.badge')).toHaveText('Approved');
-  await rows.nth(1).getByRole('button', { name: 'Reopen row', exact: true }).click();
-  await page.getByLabel('What needs to change?', { exact: true }).fill('Correct the work date.');
-  await page.getByRole('button', { name: 'Return to draft', exact: true }).click();
-  await saved(page);
-  await expect(rows.nth(1).locator('input').first()).toBeEnabled();
-  await expect(rows.nth(2).locator('.badge')).toHaveText('Approved');
-  await expect(rows.nth(3).locator('.badge')).toHaveText('Awaiting approval');
-  await rows.nth(1).getByRole('button', { name: 'View note', exact: true }).click();
-  await expect(page.locator('#row-note')).toHaveValue('Keep this work note 0');
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await rows.nth(3).getByRole('button', { name: 'Return row for changes', exact: true }).click();
-  await page.getByLabel('What needs to change?', { exact: true }).fill('Add the missing work description.');
-  await page.getByRole('button', { name: 'Return to draft', exact: true }).click();
-  await saved(page);
-  await expect(rows.nth(3).locator('.badge')).toHaveText('Draft');
-  await expect(rows.nth(2).locator('.badge')).toHaveText('Approved');
-  await page.screenshot({ path: info.outputPath('row-corrections.png'), fullPage: true });
-  const doc = await (await page.request.get('/api/workspace')).json();
-  const sheet = doc.data.sheets.find(s => s.id === 'old0');
-  expect(sheet.rows.map(r => r.status)).toEqual(['approved','draft','approved','draft','draft']);
-  expect(sheet.rows[1].hours[sheet.start]).toBe(1);
-  sheet.rows[0].status = 'draft';
-  const forged = await page.request.put('/api/workspace', { headers: { Origin: 'http://127.0.0.1:3100' }, data: { data: doc.data, revision: doc.revision } });
-  expect(forged.status()).toBe(400);
-  await page.reload();
-  await expect(page.getByRole('navigation')).toBeVisible();
-  const persisted = await (await page.request.get('/api/workspace')).json();
-  expect(persisted.data.sheets.find(s => s.id === 'old0').rows.map(r => r.status)).toEqual(['approved','draft','approved','draft','draft']);
+test('legacy mixed sheets explain recovery and preserve invoiced hours', async ({page})=>{
+ await page.goto('/');await register(page,'Legacy reviewer',email('legacy'));
+ await page.evaluate(async()=>{
+  state=retainAccounts(seed());const sheet=state.sheets.find(s=>s.id==='old0');
+  sheet.rows.push({id:'legacy-draft',contractId:'c1',rate:12500,status:'draft',note:'Keep this',hours:{[sheet.start]:1}});refreshSheet(sheet);
+  await api('/api/workspace/import',{method:'POST',body:JSON.stringify({data:state,revision})});await loadWorkspace();openSheet(sheet.employeeId,sheet.start);
+ });
+ await expect(page.locator('.note[role=status]')).toContainText('older timesheet has mixed row statuses');
+ await expect(page.locator('.time-table input:enabled')).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'Return timesheet for changes',exact:true})).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'Reopen row',exact:true})).toHaveCount(0);
+ await page.getByRole('button',{name:'View invoice',exact:true}).click();await expect(page.getByRole('dialog')).toContainText('INV-1001');
 });
 
 test('payment reversal and invoice void retain history and release hours for rebilling', async ({ page }, info) => {
@@ -524,12 +449,12 @@ test('draft row undo, empty sheet deletion, contract archive and unused deletion
 
 });
 
-test('approval queue finds older mixed sheets, opens the right period and removes reviewed entries', async ({page},info)=>{
+test('approval queue finds older timesheets, opens the right period and removes reviewed entries', async ({page},info)=>{
  await page.goto('/');await register(page,'Queue reviewer',email('approval-queue'));
  await page.evaluate(()=>{
   state=retainAccounts(seed());
   const old=state.sheets.find(s=>s.id==='old0');state.invoices=state.invoices.filter(i=>i.id!=='i0');
-  old.rows.push({id:'old-submitted',contractId:'c1',rate:12500,status:'submitted',note:'',hours:{[old.start]:2}},{id:'old-draft',contractId:'c1',rate:12500,status:'draft',note:'',hours:{[old.start]:1}});refreshSheet(old);save();render();
+  old.rows=[{id:'old-submitted',contractId:'c1',rate:12500,status:'submitted',note:'',hours:{[old.start]:2}}];refreshSheet(old);save();render();
  });await saved(page);
  await page.locator('nav button[title=Approvals]').click();
  const rows=page.locator('.approval-table tbody tr');await expect(rows).toHaveCount(2);
@@ -545,11 +470,11 @@ test('approval queue finds older mixed sheets, opens the right period and remove
  const expected=await page.evaluate(()=>({start:state.sheets.find(s=>s.id==='old0').start,range:range(state.sheets.find(s=>s.id==='old0').start)}));
  await rows.first().getByRole('button',{name:/Review/}).click();
  await expect(page.getByRole('combobox',{name:'Timesheet employee'})).toHaveValue('e1');await expect(page.locator('.period-nav strong')).toHaveText(expected.range);
- await page.getByRole('button',{name:'Approve submitted hours',exact:true}).click();await saved(page);
+ await page.getByRole('button',{name:'Approve timesheet',exact:true}).click();await saved(page);
  await page.getByRole('button',{name:'Back to approvals',exact:false}).click();await expect(rows).toHaveCount(1);await expect(rows.first()).toContainText('Maya Chen');
  await rows.first().getByRole('button',{name:/Review/}).click();
- await page.getByRole('button',{name:'Return submitted hours for changes',exact:true}).click();
- await page.getByLabel('What needs to change?',{exact:true}).fill('Clarify the work performed.');await page.getByRole('button',{name:'Return to draft',exact:true}).click();await saved(page);
+ await page.getByRole('button',{name:'Return timesheet for changes',exact:true}).click();
+ await page.getByLabel('What needs to change?',{exact:true}).fill('Clarify the work performed.');await page.getByRole('button',{name:'Return timesheet',exact:true}).click();await saved(page);
  await page.getByRole('button',{name:'Back to approvals',exact:false}).click();await expect(page.locator('#approval-results')).toContainText('All caught up');
  await page.reload();await page.locator('nav button[title=Approvals]').click();await expect(page.locator('#approval-results')).toContainText('All caught up');
  const current=await (await page.request.get('/api/workspace')).json();
@@ -564,11 +489,11 @@ test('approval queue finds older mixed sheets, opens the right period and remove
 
 test('standard invoice selection limits periods and entries and edits drafts in place', async({page},info)=>{
  await page.goto('/');await register(page,'Selection reviewer',email('invoice-selection'));
- await page.evaluate(()=>{
+ await page.evaluate(async()=>{
   state=retainAccounts(seed());const sheet=state.sheets.find(s=>s.id==='s1');
   sheet.rows=[['select-a','approved',2],['select-b','approved',3],['skip-draft','draft',1],['skip-submitted','submitted',1]].map(([id,status,value])=>({id,contractId:'c1',rate:12500,status,note:id,hours:{[sheet.start]:value}}));refreshSheet(sheet);
   const maya=state.sheets.find(s=>s.id==='s2');maya.rows[0].status='approved';maya.rows[0].hours={[maya.start]:4};refreshSheet(maya);
-  const older=state.sheets.find(s=>s.id==='old0');older.rows.push({id:'older-unbilled',contractId:'c1',rate:12500,status:'approved',note:'Historical extra work',hours:{[older.start]:1}});save();view='invoices';render();
+  const older=state.sheets.find(s=>s.id==='old0');older.rows.push({id:'older-unbilled',contractId:'c1',rate:12500,status:'approved',note:'Historical extra work',hours:{[older.start]:1}});await api('/api/workspace/import',{method:'POST',body:JSON.stringify({data:state,revision})});await loadWorkspace();view='invoices';render();
  });await saved(page);
  const periods=await page.evaluate(()=>({current:state.sheets.find(s=>s.id==='s1').start,older:state.sheets.find(s=>s.id==='old0').start}));
  await page.getByRole('button',{name:'Create invoice',exact:true}).click();
