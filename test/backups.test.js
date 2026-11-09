@@ -371,7 +371,7 @@ test('production entrypoint enables scheduled backups from secure configuration'
     cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], env: {
       ...Object.fromEntries(
         Object.entries(process.env).filter(
-          ([name]) => !/^(BACKUP_|GOOGLE_BACKUP_|R2_BACKUP_|RESEND_|EMAIL_|AUTH_EMAIL_|TIMESHEET_EMAIL_)/.test(name)
+          ([name]) => !/^(BACKUP_|GOOGLE_BACKUP_|R2_BACKUP_|RESEND_|EMAIL_|AUTH_EMAIL_|TIMESHEET_EMAIL_|STAGING_DATA_)/.test(name)
         )
       ), NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), DATA_DIR: f.dataDir, APP_ORIGIN: '', RENDER_EXTERNAL_URL: publicOrigin,
       BACKUP_ENABLED: 'true', BACKUP_KEY_FILE: keyFile, BACKUP_ENCRYPTION_KEY: '', BACKUP_DIR: f.directory, BACKUP_OPERATOR_EMAILS: 'admin@example.test',
