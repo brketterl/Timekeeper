@@ -1,15 +1,27 @@
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { isGovernment, rowTerms, governmentInvoice, voidBlockReason } from '../public/billing.js';
+import { auditStore } from './audit.js';
 import { validBackup } from './validation.js';
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const digest = value => createHash('sha256').update(value).digest('hex');
 const roles = ['admin', 'employee'];
-const rowView = r => ({ id: r.id, contractId: r.contractId, status: r.status, hours: r.hours, note: r.note });
+const rowView = r => ({ id: r.id, contractId: r.contractId, status: r.status, hours: r.hours, note: r.note, ...(r.feedback ? { feedback: r.feedback } : {}), ...(r.taskOrderId ? { taskOrderId: r.taskOrderId, laborCategory: r.laborCategory } : {}) });
 const sheetView = s => ({ id: s.id, employeeId: s.employeeId, start: s.start, status: s.status, rows: s.rows.map(rowView) });
 const equal = isDeepStrictEqual;
 
-export function accessStore(db) {
+export function accessStore(db, { onAuditEvent, notificationStatus, retryNotifications } = {}) {
+  const audit = auditStore(db, { onEvent: onAuditEvent });
+  const log = (session, type, id, summary, details) => audit.record(session.workspace_id, session.user_id, type, id, summary, details);
+  const removedFeedback=(session,sheet,row)=>{
+    if(!row.feedback?.length)return [];
+    const event=db.prepare(`SELECT details FROM audit_events WHERE workspace_id=? AND entity_id=? AND event_type='timesheet.rows_removed'
+      AND json_extract(details,'$.employeeId')=? AND EXISTS(SELECT 1 FROM json_each(details,'$.feedbackRows') WHERE json_extract(value,'$.id')=?) ORDER BY id DESC LIMIT 1`)
+      .get(session.workspace_id,sheet.id,sheet.employeeId,row.id);
+    return event?JSON.parse(event.details).feedbackRows.find(r=>r.id===row.id).feedback:[];
+  };
+
   const document = workspaceId => {
     const row = db.prepare('SELECT data, revision FROM workspace_documents WHERE workspace_id = ?').get(workspaceId);
     return { data: JSON.parse(row.data), revision: row.revision };
@@ -53,6 +65,7 @@ export function accessStore(db) {
     db.prepare('INSERT INTO memberships VALUES (?, ?, ?, ?)').run(user.id, invite.workspace_id, invite.role, employee.id);
     write(invite.workspace_id, doc.data, doc.revision);
     db.prepare('UPDATE invitations SET accepted_at = ? WHERE id = ?').run(Date.now(), invite.id);
+    audit.record(invite.workspace_id, user.id, 'invitation.accepted', invite.id, 'Accepted workspace invitation', { role: invite.role });
     return invite.workspace_id;
   }
   function read(session) {
@@ -64,20 +77,54 @@ export function accessStore(db) {
       const sheets = doc.data.sheets.filter(s => s.employeeId === employee.id);
       const visibleContracts = new Set([...employee.contracts, ...sheets.flatMap(s => s.rows.map(r => r.contractId))]);
       doc.data = { version: 2, demo: false, settings: { business: doc.data.settings.business, schedule: 'semimonthly' },
-        employees: [{ id: employee.id, name: employee.name, email: employee.email, active: employee.active, contracts: employee.contracts }], contracts: doc.data.contracts.filter(c => visibleContracts.has(c.id)).map(c => ({ id: c.id, name: c.name, client: c.client, active: c.active })),
+        employees: [{ id: employee.id, name: employee.name, email: employee.email, active: employee.active, contracts: employee.contracts }], contracts: doc.data.contracts.filter(c => visibleContracts.has(c.id)).map(c => ({ id: c.id, name: c.name, client: c.client, active: c.active, ...(isGovernment(c) ? { invoiceTemplate: 'government', taskOrders: c.billing?.taskOrders?.map(o=>({id:o.id,number:o.number,popStart:o.popStart,popEnd:o.popEnd})) || [] } : {}) })),
         sheets: sheets.map(sheetView), invoices: [] };
     }
     return { ...doc, role: session.role, employeeId: session.employee_id, workspaceId: session.workspace_id,
       ...(session.role === 'admin' ? { memberEmployeeIds } : {}) };
   }
-  function writeAdmin(session, input) {
+  function writeAdmin(session, input, { restore = false } = {}) {
     return transaction(() => {
       if (!input.data || !validBackup(input.data)) throw fail(400, 'Invalid workspace data.');
       for (const member of members(session.workspace_id)) {
         const employee = input.data.employees.find(e => e.id === member.employeeId);
         if (!employee?.active || employee.email.toLowerCase() !== member.email.toLowerCase()) throw fail(409, 'Keep linked account employee records active with their account email. Remove workspace access first to archive an employee.');
       }
-      return write(session.workspace_id, input.data, input.revision);
+      const before = document(session.workspace_id).data;
+      for (const old of restore ? [] : before.invoices) {
+        const incoming = input.data.invoices.find(i=>i.id===old.id);
+        const snapshot=invoice=>{const {payments,voided,...rest}=invoice;return rest};
+        if(old.sentDate&&(!incoming||!equal(snapshot(old),snapshot(incoming))))throw fail(409,'Sent invoices cannot be changed or deleted. Void the invoice instead.');
+        if(old.government&&incoming&&!equal({...snapshot(old),sentDate:null},{...snapshot(incoming),sentDate:null}))throw fail(409,'Government invoice snapshots cannot be edited. Delete an unsent draft and recreate it.');
+        if(!incoming)continue;
+        if(old.voided&&(!equal(old.voided,incoming.voided)||!equal(old.payments,incoming.payments)))throw fail(409,'Voided invoices cannot be changed.');
+        if(!old.voided&&incoming.voided){const reason=voidBlockReason(before,old);if(reason)throw fail(409,reason)}
+        for(const prior of old.payments){
+          const payment=incoming.payments.find(p=>p.id===prior.id);
+          if(!payment||!equal({...prior,reversed:null},{...payment,reversed:null})||(prior.reversed&&!equal(prior.reversed,payment.reversed)))throw fail(409,'Recorded payments cannot be changed or deleted. Reverse the entry instead.');
+        }
+        if(incoming.payments.some(p=>!old.payments.some(old=>old.id===p.id)&&p.reversed))throw fail(400,'Record a payment before reversing it.');
+      }
+      if(!restore&&input.data.invoices.some(i=>i.voided&&!before.invoices.some(old=>old.id===i.id)))throw fail(400,'Record and send an invoice before voiding it.');
+      if(!restore&&input.data.invoices.some(i=>i.government&&!before.invoices.some(old=>old.id===i.id))) throw fail(400,'Create government invoices using the monthly billing action.');
+      for(const sheet of restore ? [] : input.data.sheets) for(const row of sheet.rows) {
+        const previous=before.sheets.find(s=>s.id===sheet.id)?.rows.find(r=>r.id===row.id),history=previous?.feedback||(!previous?removedFeedback(session,sheet,row):[]),feedback=row.feedback||[];
+        const returned=previous&&['submitted','approved'].includes(previous.status)&&row.status==='draft';
+        if(!equal(feedback.slice(0,history.length),history)||feedback.length!==history.length+(returned?1:0))throw fail(409,returned?'Add one correction reason when returning hours to draft.':'Reviewer feedback history cannot be changed.');
+
+        const c=input.data.contracts.find(c=>c.id===row.contractId);
+        if(!isGovernment(c)) continue;
+        const old=before.sheets.find(s=>s.id===sheet.id)?.rows.find(r=>r.id===row.id);
+        if(old&&!old.taskOrderId&&!row.taskOrderId&&(equal(old,row)||(row.status==='draft'&&equal({...row,status:old.status},old))))continue;
+        if(old && old.status!=='draft') {
+          if(row.taskOrderId!==old.taskOrderId) throw fail(409,'Withdraw or reopen time before changing its task order.');
+          Object.assign(row,{rate:old.rate,taskOrderId:old.taskOrderId,categoryId:old.categoryId,laborCategory:old.laborCategory});
+        } else { try { Object.assign(row,rowTerms(c,sheet.employeeId,row)); } catch(e) { throw fail(400,e.message); } }
+      }
+      const result = write(session.workspace_id, input.data, input.revision);
+      audit.changes(session, before, input.data, { restored: restore });
+      if(restore)log(session,'workspace.restored',session.workspace_id,'Restored workspace JSON backup');
+      return result;
     });
   }
   function writeEmployee(session, input) {
@@ -86,15 +133,16 @@ export function accessStore(db) {
       const doc = document(session.workspace_id), employee = doc.data.employees.find(e => e.id === session.employee_id && e.active);
       if (!employee) throw fail(403, 'Your employee record is inactive.');
       const oldSheets = doc.data.sheets.filter(s => s.employeeId === employee.id);
-      if (oldSheets.some(old => !input.sheets.some(s => s.id === old.id))) throw fail(403, 'Existing timesheets cannot be deleted.');
+      if (oldSheets.some(old => old.rows.length && !input.sheets.some(s => s.id === old.id))) throw fail(403, 'Existing timesheets cannot be deleted.');
       const incoming = input.sheets.map(s => {
         if (!s || Object.keys(s).some(k => !['id', 'employeeId', 'start', 'status', 'rows'].includes(k)) || s.employeeId !== employee.id || !Array.isArray(s.rows)) throw fail(403, 'Only your own timesheets may be changed.');
         const old = oldSheets.find(x => x.id === s.id);
         if (old && old.start !== s.start) throw fail(403, 'Timesheet dates cannot be changed.');
         if (old?.rows.some(r => r.status !== 'draft' && !s.rows.some(row => row.id === r.id))) throw fail(403, 'Locked rows cannot be removed.');
         const rows = s.rows.map(r => {
-          if (!r || Object.keys(r).some(k => !['id', 'contractId', 'status', 'hours', 'note'].includes(k))) throw fail(400, 'Invalid time entry fields.');
+          if (!r || Object.keys(r).some(k => !['id', 'contractId', 'status', 'hours', 'note', 'taskOrderId', 'laborCategory', 'feedback'].includes(k))) throw fail(400, 'Invalid time entry fields.');
           const previous = old?.rows.find(x => x.id === r.id);
+          if(!equal(previous?.feedback||(!previous?removedFeedback(session,s,r):[]),r.feedback||[]))throw fail(403,'Only admins can add reviewer feedback; existing feedback must be kept.');
           if (previous?.status === 'approved') {
             if (!equal(rowView(previous), r)) throw fail(403, 'Approved hours are locked.');
             return previous;
@@ -106,12 +154,17 @@ export function accessStore(db) {
           if (!['draft', 'submitted'].includes(r.status)) throw fail(403, 'Only admins can approve hours.');
           const contract = doc.data.contracts.find(c => c.id === r.contractId);
           if ((!previous || !equal(rowView(previous), r)) && (!contract?.active || !employee.contracts.includes(r.contractId))) throw fail(403, 'Use an active assigned contract.');
-          return { ...r, rate: r.status === 'submitted' || !previous ? contract?.rate : previous.rate };
+          let terms;
+          try { terms = rowTerms(contract, employee.id, r); } catch(e) { throw fail(400,e.message); }
+          return { ...r, rate: r.status === 'submitted' || !previous ? terms.rate : previous.rate, ...(isGovernment(contract) ? terms : {}) };
         });
         return { ...s, rows };
       });
+      const before = structuredClone(doc.data);
       doc.data.sheets = [...doc.data.sheets.filter(s => s.employeeId !== employee.id), ...incoming];
-      return write(session.workspace_id, doc.data, input.revision);
+      const result = write(session.workspace_id, doc.data, input.revision);
+      audit.changes(session, before, doc.data);
+      return result;
     });
   }
   function changeEmail(session, email, verifiedHash, sessionHash) {
@@ -128,9 +181,11 @@ export function accessStore(db) {
         if (!employee) throw fail(409, 'An employee link needs repair before the email can be changed.');
         employee.email = email;
         write(link.workspace_id, doc.data, doc.revision);
+        for (const prior of db.prepare('SELECT id FROM invitations WHERE workspace_id=? AND employee_id=? AND accepted_at IS NULL AND revoked_at IS NULL').all(link.workspace_id, employee.id)) audit.record(link.workspace_id, session.user_id, 'invitation.revoked', prior.id, 'Revoked invitation after account email changed', { reason: 'email_changed' });
         db.prepare('UPDATE invitations SET revoked_at = ? WHERE workspace_id = ? AND employee_id = ? AND accepted_at IS NULL AND revoked_at IS NULL').run(Date.now(), link.workspace_id, employee.id);
       }
       db.prepare('UPDATE users SET email = ? WHERE id = ?').run(email, session.user_id);
+      db.prepare('DELETE FROM password_resets WHERE user_id = ?').run(session.user_id);
       db.prepare('DELETE FROM sessions WHERE user_id = ?').run(session.user_id);
     });
   }
@@ -156,14 +211,42 @@ export function accessStore(db) {
       if (members(session.workspace_id).some(m => m.employeeId === employeeId)) throw fail(409, 'This person has sign-in access. Correct your own email in My account, or remove their workspace access before removing the Team record.');
       const hasHistory = doc.data.sheets.some(s => s.employeeId === employeeId);
       if (hasHistory) employee.active = false;
-      else doc.data.employees = doc.data.employees.filter(e => e.id !== employeeId);
+      else {
+        doc.data.employees = doc.data.employees.filter(e => e.id !== employeeId);
+        for(const c of doc.data.contracts)if(c.billing?.assignments)c.billing.assignments=c.billing.assignments.filter(a=>a.employeeId!==employeeId);
+      }
       const result = write(session.workspace_id, doc.data, input.revision);
+      for (const prior of db.prepare('SELECT id FROM invitations WHERE workspace_id=? AND accepted_at IS NULL AND revoked_at IS NULL AND (employee_id=? OR (employee_id IS NULL AND email=?))').all(session.workspace_id, employeeId, employee.email)) log(session, 'invitation.revoked', prior.id, 'Revoked invitation when removing employee', { reason: 'employee_removed' });
       db.prepare(`UPDATE invitations SET revoked_at = ? WHERE workspace_id = ? AND accepted_at IS NULL
         AND revoked_at IS NULL AND (employee_id = ? OR (employee_id IS NULL AND email = ?))`)
         .run(Date.now(), session.workspace_id, employeeId, employee.email);
+      log(session, hasHistory ? 'employee.archived' : 'employee.removed', employeeId, `${hasHistory ? 'Archived' : 'Removed'} employee: ${employee.name}`);
       return { ...result, action: hasHistory ? 'archived' : 'deleted' };
     });
+    if (path === '/api/invoices/government' && method === 'POST') return transaction(() => {
+      const doc=document(session.workspace_id),before=structuredClone(doc.data);
+      if(input.revision!==doc.revision)throw fail(409,'Workspace changed. Reload before creating this invoice.');
+      let invoice;
+      try { invoice=governmentInvoice(doc.data,input,randomUUID()); } catch(e) { throw fail(400,e.message); }
+      const result=write(session.workspace_id,doc.data,doc.revision);
+      audit.changes(session,before,doc.data);
+      return {...result,invoiceId:invoice.id};
+    });
+    if (path === '/api/workspace/import' && method === 'POST') return writeAdmin(session,input,{restore:true});
     if (path === '/api/workspace' && method === 'PUT') return writeAdmin(session, input);
+    if (path === '/api/timesheet-notifications/retry' && method === 'POST') return retryNotifications(session.workspace_id);
+    if (path === '/api/timesheet-notifications/status' && method === 'GET') return notificationStatus(session.workspace_id);
+    if(path==='/api/approvals'&&method==='GET'){
+      const doc=document(session.workspace_id),events=db.prepare("SELECT details,created_at FROM audit_events WHERE workspace_id=? AND entity_id=? AND event_type='timesheet.submitted' ORDER BY id DESC");
+      const entries=doc.data.sheets.filter(sheet=>sheet.rows.some(row=>row.status==='submitted')).map(sheet=>{
+        const rows=sheet.rows.filter(row=>row.status==='submitted'),history=events.all(session.workspace_id,sheet.id).map(event=>({...event,details:JSON.parse(event.details)}));
+        const submittedDates=rows.map(row=>{for(const event of history){if(!Array.isArray(event.details.rowIds))return null;if(event.details.rowIds.includes(row.id))return event.created_at}return null});
+        const person=doc.data.employees.find(e=>e.id===sheet.employeeId);
+        return {sheetId:sheet.id,employeeId:sheet.employeeId,employeeName:person.name,active:person.active,start:sheet.start,submittedHours:rows.reduce((total,row)=>total+Object.values(row.hours).reduce((n,h)=>n+h,0),0),submittedRows:rows.length,submittedAt:submittedDates.every(date=>date!==null)?Math.min(...submittedDates):null};
+      }).sort((a,b)=>a.start.localeCompare(b.start)||(a.submittedAt??0)-(b.submittedAt??0)||a.employeeName.localeCompare(b.employeeName));
+      return {entries};
+    }
+    if (path === '/api/activity' && method === 'GET') return audit.list(session.workspace_id, input.before);
     if (path === '/api/members' && method === 'GET') return members(session.workspace_id);
     if (path === '/api/invitations' && method === 'GET') return db.prepare(`SELECT id, email, role, employee_id AS employeeId,
       expires_at AS expiresAt, accepted_at AS acceptedAt, revoked_at AS revokedAt FROM invitations WHERE workspace_id = ? ORDER BY expires_at DESC`).all(session.workspace_id);
@@ -181,16 +264,19 @@ export function accessStore(db) {
         if (members(session.workspace_id).some(m => m.employeeId === employeeId)) throw fail(409, 'This employee already has an account.');
       }
       const token = randomBytes(32).toString('hex'), id = randomUUID(), expiresAt = Date.now() + 7 * 86400_000;
+      for (const prior of db.prepare('SELECT id FROM invitations WHERE workspace_id=? AND email=? AND accepted_at IS NULL AND revoked_at IS NULL').all(session.workspace_id, email)) log(session, 'invitation.revoked', prior.id, 'Replaced workspace invitation', { reason: 'replacement' });
       db.prepare('UPDATE invitations SET revoked_at = ? WHERE workspace_id = ? AND email = ? AND accepted_at IS NULL AND revoked_at IS NULL').run(Date.now(), session.workspace_id, email);
       db.prepare('INSERT INTO invitations VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)').run(id, session.workspace_id, email, input.role, employeeId, digest(token), session.user_id, expiresAt);
+      log(session, 'invitation.created', id, `Invited ${email} as ${input.role}`, { email, role: input.role });
       return { id, token, expiresAt };
     });
     const inviteMatch = /^\/api\/invitations\/([a-zA-Z0-9-]+)$/.exec(path);
-    if (inviteMatch && method === 'DELETE') {
+    if (inviteMatch && method === 'DELETE') return transaction(() => {
       const result = db.prepare('UPDATE invitations SET revoked_at = ? WHERE id = ? AND workspace_id = ? AND accepted_at IS NULL AND revoked_at IS NULL').run(Date.now(), inviteMatch[1], session.workspace_id);
       if (!result.changes) throw fail(404, 'Pending invitation not found.');
+      log(session, 'invitation.revoked', inviteMatch[1], 'Revoked workspace invitation');
       return { ok: true };
-    }
+    });
     const memberMatch = /^\/api\/members\/([a-zA-Z0-9-]+)$/.exec(path);
     if (memberMatch && ['PATCH', 'DELETE'].includes(method)) return transaction(() => {
       const member = members(session.workspace_id).find(m => m.userId === memberMatch[1]);
@@ -198,9 +284,13 @@ export function accessStore(db) {
       if (method === 'PATCH' && !roles.includes(input.role)) throw fail(400, 'Choose admin or employee.');
       if (member.role === 'admin' && (method === 'DELETE' || input.role !== 'admin') && members(session.workspace_id).filter(m => m.role === 'admin').length <= 1) throw fail(409, 'A workspace must retain at least one admin.');
       if (method === 'DELETE') {
+        log(session, 'member.removed', member.userId, `Removed workspace access for ${member.name}`, { previousRole: member.role });
         db.prepare('DELETE FROM memberships WHERE workspace_id = ? AND user_id = ?').run(session.workspace_id, member.userId);
         db.prepare('DELETE FROM sessions WHERE workspace_id = ? AND user_id = ?').run(session.workspace_id, member.userId);
-      } else db.prepare('UPDATE memberships SET role = ? WHERE workspace_id = ? AND user_id = ?').run(input.role, session.workspace_id, member.userId);
+      } else {
+        if (member.role !== input.role) log(session, 'member.role_changed', member.userId, `Changed ${member.name} from ${member.role} to ${input.role}`, { from: member.role, to: input.role });
+        db.prepare('UPDATE memberships SET role = ? WHERE workspace_id = ? AND user_id = ?').run(input.role, session.workspace_id, member.userId);
+      }
       return { ok: true };
     });
     throw fail(404, 'Not found.');

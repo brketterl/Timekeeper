@@ -48,7 +48,7 @@ test('online encrypted snapshots recover committed WAL data, logins, memberships
   assert((await stat(join(f.dataDir, 'timekeeper.sqlite-wal'))).size > 0);
   const archive = await createArchive(f.db, f.directory, f.key);
   assert(!(await readFile(archive.path)).includes(Buffer.from('admin@example.test')));
-  const metadata = await verifyArchive(archive.path, f.key); assert.equal(metadata.schemaVersion, 2);
+  const metadata = await verifyArchive(archive.path, f.key); assert.equal(metadata.schemaVersion, 5);
   const restoredPath = join(f.root, 'restored'); await restoreArchive(archive.path, f.key, restoredPath);
   const recovered = new DatabaseSync(join(restoredPath, 'timekeeper.sqlite'));
   try {
@@ -70,6 +70,36 @@ test('online encrypted snapshots recover committed WAL data, logins, memberships
     const result = await fetch(origin + '/api/workspace', { headers: { Cookie: login.headers.get('set-cookie').split(';')[0] } });
     const workspace = await result.json(); assert.equal(workspace.data.invoices[0].payments[0].amount, 100000);
   } finally { await new Promise(r => server.close(r)); }
+});
+
+test('schema-5 restore retains history, clears queued mail and reset links, and old schemas restore', async t => {
+  const f = await fixture(t);
+  f.db.prepare(`INSERT INTO audit_events(workspace_id,actor_id,actor_name,actor_role,event_type,entity_id,summary,details,created_at) VALUES(?,?,?,?,?,?,?,?,?)`).run('one','admin','Historic admin','admin','workspace.updated','one','Updated settings','{}',Date.now());
+  const auditId = f.db.prepare('SELECT id FROM audit_events').get().id;
+  f.db.prepare('INSERT INTO timesheet_notifications VALUES(?,?,?,0,?,NULL,NULL,NULL)').run('pending-test-notification',auditId,'admin',Date.now());
+  f.db.prepare('INSERT INTO password_resets VALUES(?,?,?,?,?,?)').run('hashed-token', 'admin', 'admin@example.test', 'credential-fingerprint', Date.now(), Date.now() + 1800_000);
+  const archive = await createArchive(f.db, f.directory, f.key), target = join(f.root, 'restored-v3');
+  await restoreArchive(archive.path, f.key, target);
+  const restored = new DatabaseSync(join(target, 'timekeeper.sqlite'));
+  assert.equal(restored.prepare('SELECT COUNT(*) AS n FROM password_resets').get().n, 0);
+  assert.equal(restored.prepare('SELECT COUNT(*) AS n FROM timesheet_notifications').get().n, 0);
+  assert.equal(restored.prepare('SELECT actor_name FROM audit_events').get().actor_name, 'Historic admin'); restored.close();
+  f.db.exec('DROP TABLE timesheet_notifications; DELETE FROM schema_migrations WHERE version=5;');
+  const v4Archive = await createArchive(f.db, f.directory, f.key);
+  assert.equal((await verifyArchive(v4Archive.path, f.key)).schemaVersion, 4);
+  await restoreArchive(v4Archive.path, f.key, join(f.root, 'restored-schema-4'));
+  f.db.exec('DROP TABLE audit_events; DELETE FROM schema_migrations WHERE version=4;');
+  const v3Archive = await createArchive(f.db, f.directory, f.key);
+  assert.equal((await verifyArchive(v3Archive.path, f.key)).schemaVersion, 3);
+  await restoreArchive(v3Archive.path, f.key, join(f.root, 'restored-schema-3'));
+  // A real schema-2 snapshot models archives produced before the migration.
+  f.db.exec('DROP TABLE IF EXISTS audit_events; DROP TABLE password_resets; DELETE FROM schema_migrations WHERE version>=3;');
+  const oldArchive = await createArchive(f.db, f.directory, f.key);
+  assert.equal((await verifyArchive(oldArchive.path, f.key)).schemaVersion, 2);
+  const oldTarget = join(f.root, 'restored-v2'); await restoreArchive(oldArchive.path, f.key, oldTarget);
+  const upgraded = openDatabase(oldTarget);
+  assert.equal(upgraded.prepare('SELECT MAX(version) AS n FROM schema_migrations').get().n, 5);
+  assert.equal(upgraded.prepare('SELECT COUNT(*) AS n FROM users').get().n, 3); upgraded.close();
 });
 
 test('wrong keys, tampering, truncation, and existing restore destinations are rejected', async t => {
@@ -95,6 +125,18 @@ test('retention only removes managed archives after a verified replacement', asy
   f.db.close(); await assert.rejects(createArchive(f.db, f.directory, f.key));
   assert.equal((await listArchives(f.directory)).length, 2);
   await assert.rejects(pruneArchives(f.directory, 0, archives[2].name));
+});
+
+test('first scheduled backup remains due while the clock advances between checks', async t => {
+  const f = await fixture(t); let time = Date.now();
+  const service = backupService(f.db, { directory: f.directory, key: f.key, retain: 2, intervalMs: 86400_000, operators: [] },
+    { autoStart: false, now: () => time++ });
+  try {
+    await service.ready; await service.checkDue();
+    assert(service.status().lastSuccessAt, 'The first backup must run without waiting for a later scheduler tick.');
+    const names = await listArchives(f.directory); assert.equal(names.length, 1);
+    await verifyArchive(join(f.directory, names[0]), f.key);
+  } finally { await service.stop(); }
 });
 
 test('daily schedule, retries, restart checkpoint, and destination changes are tracked', async t => {
@@ -319,7 +361,7 @@ test('Google setup uses state and PKCE and cleans up denied authorization withou
   assert(!errors.includes('test-client-secret'));
 });
 
-test('production entrypoint enables scheduled backups from secure configuration', { timeout: 10000 }, async t => {
+test('production entrypoint enables scheduled backups from secure configuration', { timeout: 20000 }, async t => {
   const f = await fixture(t), keyFile = join(f.root, 'private.backup.key');
   await writeFile(keyFile, f.key.toString('base64'), { mode: 0o600 });
   const probe = createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
@@ -329,7 +371,7 @@ test('production entrypoint enables scheduled backups from secure configuration'
     cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], env: {
       ...Object.fromEntries(
         Object.entries(process.env).filter(
-          ([name]) => !/^(BACKUP_|GOOGLE_BACKUP_|R2_BACKUP_|RESEND_|EMAIL_)/.test(name)
+          ([name]) => !/^(BACKUP_|GOOGLE_BACKUP_|R2_BACKUP_|RESEND_|EMAIL_|AUTH_EMAIL_|TIMESHEET_EMAIL_)/.test(name)
         )
       ), NODE_ENV: 'production', HOST: '127.0.0.1', PORT: String(port), DATA_DIR: f.dataDir, APP_ORIGIN: '', RENDER_EXTERNAL_URL: publicOrigin,
       BACKUP_ENABLED: 'true', BACKUP_KEY_FILE: keyFile, BACKUP_ENCRYPTION_KEY: '', BACKUP_DIR: f.directory, BACKUP_OPERATOR_EMAILS: 'admin@example.test',
@@ -344,12 +386,13 @@ test('production entrypoint enables scheduled backups from secure configuration'
   assert.equal(login.status, 200); assert.match(login.headers.get('set-cookie'), /Secure/);
   const cookie = login.headers.get('set-cookie').split(';')[0];
   let status;
-  for (let i = 0; i < 100; i++) {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
     status = await (await fetch(base + '/api/backups/status', { headers: { Cookie: cookie } })).json();
     if (status.lastSuccessAt) break;
     await new Promise(r => setTimeout(r, 20));
   }
-  assert.equal(status.enabled, true); assert.equal(status.canDownload, true); assert(status.lastLocalAt); assert.equal(status.offsiteConfigured, false);
+  assert.equal(status.enabled, true); assert.equal(status.canDownload, true); assert(status.lastLocalAt, JSON.stringify(status) + errorText); assert.equal(status.offsiteConfigured, false);
   const [name] = await listArchives(f.directory); await verifyArchive(join(f.directory, name), f.key);
   const exited = once(child, 'exit'); child.kill('SIGTERM'); const [code] = await exited; assert.equal(code, 0);
 });

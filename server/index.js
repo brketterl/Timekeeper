@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { openDatabase } from './db.js';
 import { accessStore } from './access.js';
-import { emailOptions, resendSender } from './email.js';
+import { timesheetNotifications } from './timesheet-notifications.js';
+import { accountEmail } from './account-email.js';
+import { emailOptions, resendSender, resendTransport, accountEmailOptions, timesheetEmailOptions } from './email.js';
 import { backupOptions, backupService } from './backups.js';
 import { r2BackupOptions, r2Destination } from './r2-backups.js';
 import { googleBackupOptions, googleDriveDestination } from './google-backups.js';
@@ -44,7 +46,7 @@ async function body(req) {
   catch { throw fail(400, 'Invalid JSON.'); }
 }
 
-export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), secureCookies = process.env.NODE_ENV === 'production', allowedOrigin = process.env.APP_ORIGIN, backupConfig = null } = {}) {
+export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), secureCookies = process.env.NODE_ENV === 'production', allowedOrigin = process.env.APP_ORIGIN, backupConfig = null, accountEmailConfig = null, authAttemptLimit = 20, allowPublicRegistration = false, timesheetEmailConfig = null } = {}) {
   if (secureCookies && !allowedOrigin) throw Error('APP_ORIGIN is required in production.');
   if (allowedOrigin) {
     const origin = new URL(allowedOrigin);
@@ -52,16 +54,22 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
     if (secureCookies && origin.protocol !== 'https:') throw Error('Production requires an HTTPS APP_ORIGIN.');
     allowedOrigin = origin.origin;
   }
+  for (const config of [accountEmailConfig, timesheetEmailConfig].filter(Boolean)) {
+    const origin = new URL(config.origin);
+    if (!['http:', 'https:'].includes(origin.protocol) || origin.origin !== config.origin || (secureCookies && origin.protocol !== 'https:')) throw Error('Account email requires a trusted app origin.');
+  }
   const db = openDatabase(dataDir);
+  const accounts = accountEmail(db, accountEmailConfig, { hashPassword });
   const attempts = new Map();
-  const access = accessStore(db);
+  const notices = timesheetNotifications(db, timesheetEmailConfig);
+  const access = accessStore(db, { onAuditEvent: notices.enqueue, notificationStatus: notices.status, retryNotifications: notices.retryFailed });
   const recovery = backupService(db, backupConfig, { destination: backupConfig?.destination });
   function checkAuthLimit(req) {
     const now = Date.now();
     for (const [key, entry] of attempts) if (entry.until < now) attempts.delete(key);
     const key = req.socket.remoteAddress;
     const entry = attempts.get(key) || { count: 0, until: now + 15 * 60_000 };
-    if (++entry.count > 20) throw fail(429, 'Too many attempts. Try again in 15 minutes.');
+    if (++entry.count > authAttemptLimit) throw fail(429, 'Too many attempts. Try again in 15 minutes.');
     attempts.set(key, entry);
   }
   const cookie = (token, maxAge) => `timekeeper_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secureCookies ? '; Secure' : ''}`;
@@ -75,7 +83,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
     const send = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value)); };
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'same-origin');
+    res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
@@ -85,7 +93,11 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         const html = await readFile(new URL('../public/index.html', import.meta.url));
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(html);
       }
-      if (req.method === 'GET' && ['/auth.js', '/access.js', '/backups.js'].includes(path)) {
+      if (req.method === 'GET' && path === '/billing.js') {
+        res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
+        return res.end(await readFile(new URL('../public/billing.js', import.meta.url)));
+      }
+      if (req.method === 'GET' && ['/auth.js', '/access.js', '/backups.js', '/activity.js', '/notifications.js', '/government.js', '/recovery.js', '/approvals.js', '/invoice-selection.js', '/mobile-timesheets.js'].includes(path)) {
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
         return res.end(await readFile(new URL(`../public${path}`, import.meta.url)));
       }
@@ -93,6 +105,23 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
       if (!['GET', 'HEAD'].includes(req.method)) {
         const expectedOrigin = allowedOrigin || `http://${req.headers.host}`;
         if (req.headers.origin !== expectedOrigin) throw fail(403, 'Request origin is not allowed.');
+      }
+      if (req.method === 'GET' && path === '/api/auth/features') return send(200, { ...accounts.status(), publicRegistration: allowPublicRegistration });
+      if (req.method === 'POST' && path === '/api/auth/forgot-password') {
+        checkAuthLimit(req);
+        const input = await body(req);
+        const email = typeof input.email === 'string' ? input.email.trim().toLowerCase() : '';
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) throw fail(400, 'Enter a valid email.');
+        accounts.requestReset(email);
+        return send(200, { message: 'If an account exists and email delivery is enabled, a password reset link will be emailed. Check your inbox and spam folder.' });
+      }
+      if (req.method === 'POST' && path === '/api/auth/reset-password') {
+        checkAuthLimit(req);
+        const input = await body(req);
+        if (typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 256) throw fail(400, 'Use a password of 12–256 characters.');
+        await accounts.reset(input.token, input.password);
+        res.setHeader('Set-Cookie', cookie('', 0));
+        return send(200, { ok: true });
       }
       if (req.method === 'POST' && ['/api/auth/register', '/api/auth/login', '/api/invitations/preview'].includes(path)) {
         const now = Date.now();
@@ -106,6 +135,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         const password = input.password;
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254 || typeof password !== 'string' || password.length > 256) throw fail(400, 'Enter a valid email and password.');
         if (path.endsWith('/register')) {
+          if (!allowPublicRegistration && !input.inviteToken) throw fail(403, 'An invitation is required to create an account. Ask your workspace admin for an invitation.');
           const name = typeof input.name === 'string' ? input.name.trim() : '';
           if (!name || name.length > 100 || password.length < 12) throw fail(400, 'Provide your name and a password of at least 12 characters.');
           const passwordHash = await hashPassword(password);
@@ -130,6 +160,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         }
         const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
         if (!await checkPassword(password, user?.password_hash) || !user) throw fail(401, 'Email or password is incorrect.');
+        if (db.prepare('SELECT password_hash FROM users WHERE id=?').get(user.id)?.password_hash !== user.password_hash) throw fail(401, 'Email or password is incorrect.');
         const membership = input.inviteToken
           ? { workspace_id: access.transaction(() => access.join(access.invitation(input.inviteToken), user)) }
           : db.prepare('SELECT workspace_id FROM memberships WHERE user_id = ? ORDER BY workspace_id LIMIT 1').get(user.id);
@@ -196,7 +227,11 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         return send(200, { ok: true });
       }
       const input = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await body(req) : {};
-      const result = await access.route(path, req.method, session, input);
+      if (path === '/api/activity' && req.method === 'GET') input.before = new URL(req.url, 'http://localhost').searchParams.get('before');
+      if (['/api/invitations', '/api/timesheet-notifications/retry'].includes(path) && req.method === 'POST') checkAuthLimit(req);
+      let result = await access.route(path, req.method, session, input);
+      if ((req.method === 'PUT' && ['/api/workspace', '/api/employee/timesheets'].includes(path)) || (req.method === 'POST' && path === '/api/timesheet-notifications/retry')) void notices.checkDue();
+      if (path === '/api/invitations' && req.method === 'POST') result = await accounts.invite(result);
       if (path === '/api/invitations/accept') {
         issueSession(res, session.user_id, result.workspaceId);
         db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(digest(token));
@@ -209,7 +244,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
     }
   });
   let resourcesClosing;
-  server.once('close', () => { resourcesClosing = recovery.stop().finally(() => db.close()); });
+  server.once('close', () => { resourcesClosing = Promise.all([recovery.stop(), accounts.stop(), notices.stop()]).finally(() => db.close()); });
   const closeHttp = server.close;
   server.close = function (callback) {
     return closeHttp.call(server, error => { Promise.resolve(resourcesClosing).then(() => callback?.(error), failure => callback?.(failure)); });
@@ -219,11 +254,12 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
 
 export function deploymentOptions(env = process.env) {
   const production = env.NODE_ENV === 'production';
+  if (env.ALLOW_PUBLIC_REGISTRATION && !['true', 'false'].includes(env.ALLOW_PUBLIC_REGISTRATION)) throw Error('ALLOW_PUBLIC_REGISTRATION must be true or false.');
   const port = Number(env.PORT || 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw Error('PORT must be an integer from 1 to 65535.');
   return {
     port, host: env.HOST || (production ? '0.0.0.0' : '127.0.0.1'),
-    dataDir: resolve(env.DATA_DIR || '.data'), secureCookies: production,
+    dataDir: resolve(env.DATA_DIR || '.data'), secureCookies: production, allowPublicRegistration: env.ALLOW_PUBLIC_REGISTRATION === 'true',
     allowedOrigin: env.APP_ORIGIN || env.RENDER_EXTERNAL_URL
   };
 }
@@ -244,7 +280,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       backupConfig.alerts = { send: resendSender(alertConfig) };
     }
   }
-  const server = createApp({ ...options, backupConfig });
+  const accountConfig = await accountEmailOptions();
+  const accountEmailConfig = accountConfig ? { send: resendTransport(accountConfig), origin: new URL(options.allowedOrigin || `http://127.0.0.1:${port}`).origin } : null;
+  const notificationConfig = await timesheetEmailOptions();
+  const timesheetEmailConfig = notificationConfig ? { send: resendTransport(notificationConfig), origin: new URL(options.allowedOrigin || `http://127.0.0.1:${port}`).origin } : null;
+  const server = createApp({ ...options, backupConfig, accountEmailConfig, timesheetEmailConfig });
   server.listen(port, host, () => console.log(`Timekeeper listening on ${host}:${port}`));
   const shutdown = () => {
     server.close(() => { process.exitCode = 0; });

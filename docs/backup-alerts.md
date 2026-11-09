@@ -65,4 +65,4 @@ Save without deployment if possible until the user approves the code release to 
 
 Once deployment is Live, sign into the hosted app as the configured backup operator and use **Send test backup alert**. Confirm actual receipt and a recent off-site backup timestamp. The status shows the last email accepted by the provider, not confirmed inbox delivery.
 
-To disable alert emails, set `BACKUP_ALERTS_ENABLED=false` and restart/redeploy. Existing encrypted backups continue. To rotate the key, update the secret file and restart; never expose it in logs or screenshots. No database schema migration is needed. Password reset and invitation email delivery are separate future work.
+To disable alert emails, set `BACKUP_ALERTS_ENABLED=false` and restart/redeploy. Existing encrypted backups continue. To rotate the key, update the secret file and restart; never expose it in logs or screenshots. No database schema migration is needed. Password reset and invitation email delivery use the separate [account email configuration](account-email.md).
