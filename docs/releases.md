@@ -72,7 +72,7 @@ If GitHub does not offer enforcement for the repository's visibility and plan, u
 4. Push the change to `staging`, or open a feature PR targeting `staging` and merge after checks pass. GitHub runs the backend suite in test and production modes plus Chromium browser tests.
 5. Wait for the exact tested commit to deploy to the hosted staging service. Review its URL using fake records and the appropriate admin/employee roles. Local testing is optional; user review happens on hosted staging.
 6. Record the tested commit and ask the user to approve the concrete result. New commits require checks and review again.
-7. Open a PR from `staging` into `main`. For this repository, the compare page is <https://github.com/brketterl/Timekeeper/compare/main...staging?expand=1>. Review the final diff and required checks. Merge only after the user authorizes that release.
+7. Prepare a release branch from current `main`, carrying only approved product changes and the production release boundary check. Exclude the staging-only data refresh enhancement and its hooks/tests. Run `node scripts/check-production-release.js`, then open a PR from that release branch into `main`. Do not merge `staging` wholesale. For this repository, the compare page is <https://github.com/brketterl/Timekeeper/compare/main...staging?expand=1>. Review the final diff and required checks. Merge only after the user authorizes that release.
 8. Before merging a release with a data migration, back up the production database. After the approved merge into `main`, monitor the automatic Render deployment, then check `/health`, login, and the changed behavior on production.
 9. Merge the released `main` back into `staging` if the PR merge/squash/rebase created different history, so later releases do not reintroduce old changes.
 
@@ -93,3 +93,13 @@ The operator chooses the production workspace JSON file and reviews the record c
 Linked staging employees are preserved by matching email and retaining staging employee IDs. Production employees without a linked staging account receive new employee IDs; timesheets, contract category assignments, and government invoice references are remapped together. Linked test accounts absent from the production export are kept active with no assigned contracts. Matching linked test accounts stay active so sign-in continues. Production names, hours, rates, invoice numbers, payment history, and billing snapshots are retained; authentication accounts and credentials are never imported.
 
 This is a manual snapshot, not a background sync. Later staging edits never update production, and later production edits require another explicit refresh. The source export comes from the browser's saved workspace view; ensure production has no unsaved edits, reload its latest server copy, then export.
+
+
+## Keep refresh tooling out of production releases
+
+The business-data refresh tool is a staging-only enhancement. Its first commits are `b0c5161` and `f7c410c`; exclude them from release branches. Future product releases start from up-to-date `main` and carry only approved application commits. If a product commit overlaps staging-refresh hooks, resolve the overlap without copying those hooks into the release. Keep the feature on the `staging` branch and hosted staging service.
+
+`Production release boundary` runs on main pushes and PRs targeting main. It rejects the dedicated refresh files and refresh hooks in runtime/browser-test source. Carry this workflow and `scripts/check-production-release.js` into each release branch before opening the PR. A direct staging-to-main PR intentionally fails. Require **Production release boundary** in the main branch ruleset alongside the existing backend and browser checks; adding the workflow alone does not enable branch protection. The refresh tool is also disabled by default and restricted to the staging origin at runtime as defense in depth.
+
+
+The production Render build also runs `test/production-release-boundary.test.js` through `npm test`. When APP_ORIGIN or RENDER_EXTERNAL_URL identifies `timekeeper-sbzu.onrender.com`, it runs the same exclusion check and fails the build if staging tooling is present. Carry this test into release branches with the script/workflow. It provides a deployment gate independent of GitHub branch-rule enforcement. The existing production service build command is `npm ci && npm test`; keep that check in place.
