@@ -54,3 +54,12 @@ Submission, withdrawal, approval, and return now cover every row in the semi-mon
 Legacy mixed-status sheets remain readable and retain their billing sources. An admin must return all rows together before further editing. A sheet containing invoiced hours cannot be reopened; its records remain available for review. Restoring a workspace backup preserves historical mixed states rather than rewriting them.
 
 For review on staging, try two contracts in one period: submit, withdraw, resubmit, return with feedback, correct hours, resubmit, and approve. Check both day and grid views and confirm every entry locks together. No database schema migration is needed for this trial.
+
+
+## Reuse a voided invoice number
+
+For a government invoice replacement, select the original billing month and enter the original invoice number in the editable Invoice number field. Only active invoices reserve a number. The voided invoice remains in history under its original ID, number, snapshots, and void reason; the replacement has a separate ID. Automatic numbering still advances and does not automatically recycle old numbers. Two active invoices cannot share a number.
+
+The task-order chronology check ignores voided invoices and identifies the active invoice/month blocking an earlier billing month. Later active invoices still prevent inserting an earlier month because their cumulative snapshots must remain accurate.
+
+No schema migration is required. After saving a same-number replacement, older app versions that require every historical number to be unique cannot read that workspace; rollback must retain this validation fix.

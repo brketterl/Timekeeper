@@ -332,6 +332,25 @@ test('government invoice setup creates a highlighted monthly PDF with locked cum
   await page.getByRole('button',{name:'Mark sent',exact:true}).click();await saved(page);
   const sent=await (await page.request.get('/api/workspace')).json();
   expect(sent.data.invoices[0].sentDate).toBe('2026-10-28');
+  // Re-enter a voided historical invoice without changing its external number.
+  await page.getByRole('button',{name:'Void invoice',exact:true}).click();
+  await page.locator('#correction-form [name=reason]').fill('Correct historical invoice entry.');
+  await page.getByRole('button',{name:'Void invoice',exact:true}).click();await saved(page);
+  await page.getByRole('button',{name:'Close dialog'}).click();
+  await page.locator('nav button[title=Invoices]').click();
+  await page.getByRole('button',{name:'Create invoice',exact:true}).click();
+  await page.locator('#invoice-form [name=billingMonth]').fill('2026-08');
+  await page.locator('#invoice-form [name=invoiceNumber]').fill('C&C-TEST030');
+  await page.locator('#invoice-form [name=issued]').fill('2026-08-31');
+  await page.locator('#invoice-form [name=due]').fill('2026-09-30');
+  await page.getByRole('button',{name:'Create draft',exact:true}).click();
+  await expect(page.getByRole('heading',{name:'C&C-TEST030',exact:true})).toBeVisible();await saved(page);
+  await page.reload();await expect(page.getByRole('navigation')).toBeVisible();
+  const replaced=await (await page.request.get('/api/workspace')).json();
+  expect(replaced.data.invoices.map(i=>i.number)).toEqual(['C&C-TEST030','C&C-TEST030']);
+  expect(replaced.data.invoices[0].voided.reason).toBe('Correct historical invoice entry.');
+  expect(replaced.data.invoices[1].voided).toBeUndefined();
+  expect(replaced.data.invoices[1].government.cumulativeHours).toBe(12);
 
 });
 

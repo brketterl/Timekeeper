@@ -72,7 +72,8 @@ export function governmentInvoice(data,input,invoiceId) {
   if(data.invoices.some(i=>i.contractId===c.id&&!i.government))throw Error('This contract has standard-format invoices that cannot be assigned to a task order automatically. Use a separate government contract record and enter its history chronologically.');
   const previous=data.invoices.filter(i=>!i.voided&&i.contractId===c.id&&i.government?.taskOrderId===order.id);
   if(previous.some(i=>!i.sentDate))throw Error('Mark the previous task-order invoice as sent before creating the next one.');
-  if(previous.some(i=>i.government.month>=input.month))throw Error('Create historical invoices oldest first. This task order already has an invoice for this or a later month.');
+  const blocking=previous.find(i=>i.government.month>=input.month);
+  if(blocking)throw Error(`This task order already has an invoice for this or a later month: ${blocking.number} (${blocking.government.month}). Check the selected billing month. Create historical invoices oldest first to preserve cumulative totals.`);
   const billed=new Set(data.invoices.filter(i=>!i.voided).flatMap(i=>i.lines.flatMap(l=>l.sources.map(s=>s.sheetId+'|'+s.rowId))));
   if(data.sheets.filter(s=>s.start.slice(0,7)===input.month).some(s=>s.rows.some(r=>r.contractId===c.id&&!r.taskOrderId&&Object.values(r.hours).some(h=>h>0))))throw Error('Some time in this month is missing task-order and labor-category details. Complete it before billing.');
   const candidates=data.sheets.filter(s=>s.start.slice(0,7)===input.month).flatMap(s=>s.rows.filter(r=>r.contractId===c.id&&r.taskOrderId===order.id&&Object.values(r.hours).some(h=>h>0)).map(r=>({s,r})));
@@ -96,7 +97,7 @@ export function governmentInvoice(data,input,invoiceId) {
   const cumulativeAmount=[...rows.values()].reduce((n,r)=>n+r.cumulativeAmount,0),cumulativeHours=[...rows.values()].reduce((n,r)=>n+r.cumulativeHours,0);
   if(cumulativeAmount>order.funding)throw Error('Cumulative billing exceeds task-order funding. Update the authorized funding before invoicing.');
   const generated=nextNumber(data,c),number=input.number?.trim()||generated.number;
-  if(!text(number,80)||!number.trim()||/[\x00-\x1f<>]/.test(number)||data.invoices.some(i=>i.number===number))throw Error('Use a unique invoice number of at most 80 characters.');
+  if(!text(number,80)||!number.trim()||/[\x00-\x1f<>]/.test(number)||data.invoices.some(i=>!i.voided&&i.number===number))throw Error('Use an invoice number of at most 80 characters that is not used by another active invoice. A voided invoice number can be reused.');
   if(number===generated.number)b.nextNumber=generated.next;
   else if(number.startsWith(b.prefix)&&/^\d+$/.test(number.slice(b.prefix.length)))b.nextNumber=Math.max(b.nextNumber,Number(number.slice(b.prefix.length))+1);
   const invoice={id:invoiceId,number,contractId:c.id,client:c.client,contract:c.name,email:c.email,address:c.address,business:{business:data.settings.business,email:data.settings.email,address:data.settings.address,paymentNote:data.settings.paymentNote,schedule:data.settings.schedule},issued:input.issued,due:input.due,sentDate:null,lines,payments:[],note:'',government:{version:1,certification,taskOrderId:order.id,month:input.month,agreementNumber:b.agreementNumber,taskOrderNumber:order.number,project:b.project,popStart:order.popStart,popEnd:order.popEnd,funding:order.funding,cumulativeAmount,cumulativeHours,remaining:order.funding-cumulativeAmount,signerName:signer.name,signerTitle:signer.title,rows:[...rows.values()]}};
