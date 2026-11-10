@@ -269,11 +269,38 @@ test('government invoice setup creates a highlighted monthly PDF with locked cum
   future.data.invoices[0].issued='2099-11-01';future.data.invoices[0].due='2099-12-01';
   const restored=await page.request.post('/api/workspace/import',{headers:{Origin:'http://127.0.0.1:3100'},data:{data:future.data,revision:future.revision}});
   expect(restored.status()).toBe(200);
-  await page.reload();await page.evaluate(()=>invoiceDetail(state.invoices[0].id));
+  await page.reload();await page.waitForFunction(()=>state.invoices.length>0);await page.evaluate(()=>invoiceDetail(state.invoices[0].id));
   await page.getByRole('button',{name:/^Mark sent/}).click();
   await page.locator('#send-form [name=date]').fill('2026-10-28');
   await page.getByRole('button',{name:'Mark sent',exact:true}).click();await saved(page);
   const sent=await (await page.request.get('/api/workspace')).json();
   expect(sent.data.invoices[0].sentDate).toBe('2026-10-28');
+  // Backfill an older month without rewriting the existing invoice.
+  const original=structuredClone(sent.data.invoices[0]);
+  sent.data.sheets.push({id:'historical-july',employeeId:person.id,start:'2026-07-01',status:'approved',rows:[{id:'historical-row',contractId:c.id,status:'approved',note:'',hours:{'2026-07-01':8},rate:category.rate,taskOrderId:order.id,categoryId:category.id,laborCategory:category.name}]});
+  expect((await page.request.put('/api/workspace',{headers:{Origin:'http://127.0.0.1:3100'},data:{data:sent.data,revision:sent.revision}})).status()).toBe(200);
+  await page.reload();await page.locator('nav button[title=Invoices]').click();
+  await page.getByRole('button',{name:'Create invoice',exact:true}).click();
+  await page.getByLabel('Historical record only',{exact:true}).check();
+  await page.locator('#invoice-form [name=billingMonth]').fill('2026-07');
+  await page.locator('#invoice-form [name=invoiceNumber]').fill('C&C-TEST021');
+  await page.locator('#invoice-form [name=issued]').fill('2026-08-01');
+  await page.locator('#invoice-form [name=due]').fill('2026-08-31');
+  await page.getByRole('button',{name:'Create draft',exact:true}).click();
+  await expect(page.getByRole('heading',{name:'C&C-TEST021',exact:true,level:2})).toBeVisible();
+  await expect(page.locator('.invoice-paper')).toContainText('Excluded from running totals');
+  await page.getByRole('button',{name:/^Mark sent/}).click();
+  await page.locator('#send-form [name=date]').fill('2026-08-01');
+  await page.getByRole('button',{name:'Mark sent',exact:true}).click();await saved(page);
+  await page.getByRole('button',{name:'Record payment',exact:true}).click();
+  await page.locator('#payment-form [name=date]').fill('2026-08-20');
+  await page.getByRole('button',{name:'Save payment',exact:true}).click();await saved(page);
+  const backfilled=await (await page.request.get('/api/workspace')).json();
+  expect(backfilled.data.invoices.find(i=>i.id===original.id)).toEqual(original);
+  const history=backfilled.data.invoices.find(i=>i.number==='C&C-TEST021');
+  expect(history.government.historicalRecord).toBe(true);
+  expect(history.payments[0].date).toBe('2026-08-20');
+  expect(history.payments[0].amount).toBe(116000);
+
 
 });

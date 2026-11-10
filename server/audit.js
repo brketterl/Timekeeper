@@ -30,7 +30,7 @@ export function auditStore(db, { onEvent = () => {} } = {}) {
     }
     for (const old of before.sheets) if (!after.sheets.some(s => s.id === old.id)) log('timesheet.deleted', old.id, 'Removed timesheet', { employeeId: old.employeeId, period: old.start });
     for (const invoice of after.invoices) {
-      const old = before.invoices.find(i => i.id === invoice.id), info = { number: invoice.number };
+      const old = before.invoices.find(i => i.id === invoice.id), info = { number: invoice.number, ...(invoice.government?.historicalRecord ? { historicalRecord: true } : {}) };
       if (!old) log('invoice.created', invoice.id, `Created invoice ${invoice.number}`, info);
       else if (!equal({ ...old, payments: [] }, { ...invoice, payments: [] })) log('invoice.updated', invoice.id, `Updated invoice ${invoice.number}`, info);
       for (const payment of invoice.payments) {
