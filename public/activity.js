@@ -19,6 +19,8 @@ async function loadActivity(before = null) {
       article.innerHTML = `<div class="row between wrap"><strong>${esc(event.summary)}</strong><small>${esc(new Date(event.createdAt).toLocaleString())}</small></div>
         <p class="muted">${esc(event.actorName)} · ${esc(event.actorRole === 'admin' ? 'Admin' : 'Employee')}</p>
         ${details.period ? `<small>Period starting ${esc(details.period)}${details.rows ? ` · ${esc(details.rows)} row(s)` : ''}</small>` : ''}
+        ${details.reason ? `<p class="preline">${esc(details.reason)}</p>` : ''}
+        ${details.feedbackRows?.length ? `<details><summary>Feedback from removed rows</summary>${details.feedbackRows.flatMap(row=>row.feedback).map(reason=>`<p class="preline">${esc(reason)}</p>`).join('')}</details>` : ''}
         ${typeof details.amount === 'number' ? `<small>${esc(money(details.amount))}${details.date ? ` · ${esc(details.date)}` : ''}</small>` : ''}`;
       target.append(article);
     }

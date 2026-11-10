@@ -103,6 +103,76 @@ test('future-dated invoices can record an actual earlier send date, but not a fu
   invoice.sentDate='invalid';assert.equal(validBackup(d),false);
 });
 
+test('voiding government invoices preserves snapshots and allows replacement without double counting', async()=>{
+  const {voidBlockReason}=await import('../public/billing.js');
+  const d=data();sheet(d,'july','2026-07-01',8);const july=governmentInvoice(d,input('2026-07'),'july-invoice');july.sentDate='2026-07-31';
+  sheet(d,'aug','2026-08-01',4);const aug=governmentInvoice(d,input('2026-08'),'aug-invoice');aug.sentDate='2026-08-31';
+  assert.match(voidBlockReason(d,july),/newer/);assert.equal(voidBlockReason(d,aug),'');
+  aug.voided={date:'2026-11-01',reason:'Incorrect invoice'};assert(validBackup(d));
+  const replacement=governmentInvoice(d,input('2026-08'),'replacement');
+  assert.equal(replacement.government.cumulativeHours,12);assert.equal(replacement.lines[0].hours,4);assert(validBackup(d));
+  const frozen=structuredClone(aug);d.sheets.find(s=>s.id==='aug').rows[0].note='Corrected work note';assert.deepEqual(aug,frozen);
+});
+
+test('voided invoice numbers can be explicitly reused while active numbers remain unique',()=>{
+ const d=data();sheet(d,'may','2026-05-01',8);
+ const original=governmentInvoice(d,input('2026-05',{number:'C&C-CSS026'}),'original');original.sentDate='2026-06-01';original.voided={date:'2026-11-01',reason:'Correct historical entry'};
+ const frozen=structuredClone(original);
+ const replacement=governmentInvoice(d,input('2026-05',{number:original.number}),'replacement');
+ assert.equal(replacement.number,'C&C-CSS026');assert.notEqual(replacement.id,original.id);assert.deepEqual(original,frozen);assert.equal(replacement.government.cumulativeHours,8);assert(validBackup(d));
+ // Validation must accept either record order, including export/import ordering.
+ d.invoices.reverse();assert(validBackup(d));
+ replacement.sentDate='2026-06-01';sheet(d,'june','2026-06-01',4);
+ assert.throws(()=>governmentInvoice(d,input('2026-06',{number:original.number}),'duplicate'),/another active invoice/);
+ const june=governmentInvoice(d,input('2026-06'),'june');assert.equal(june.government.cumulativeHours,12);
+ june.number=replacement.number;assert.equal(validBackup(d),false);
+});
+
+test('month-order errors identify the active invoice and ignore voided history',()=>{
+ const d=data();sheet(d,'may','2026-05-01',8);
+ const may=governmentInvoice(d,input('2026-05',{number:'C&C-CSS026'}),'may');may.sentDate='2026-06-01';
+ assert.throws(()=>governmentInvoice(d,input('2026-03'),'march'),/C&C-CSS026 \(2026-05\).*selected billing month/);
+});
+
+test('API creates same-number replacements and retains the original voided invoice',async t=>{
+ const f=await fixture(t),doc=(await f.request('/api/workspace',f.owner.cookie)).body,d=data();
+ const employee=doc.data.employees[0];d.employees[0]={...employee,contracts:['contract']};d.contracts[0].billing.assignments[0].employeeId=employee.id;
+ sheet(d,'may','2026-05-01',8);d.sheets[0].employeeId=employee.id;
+ assert.equal((await f.request('/api/workspace',f.owner.cookie,{data:d,revision:doc.revision},'PUT')).status,200);
+ let current=(await f.request('/api/workspace',f.owner.cookie)).body;
+ const create=revision=>f.request('/api/invoices/government',f.owner.cookie,{...input('2026-05',{number:'C&C-CSS026'}),revision});
+ assert.equal((await create(current.revision)).status,200);
+ current=(await f.request('/api/workspace',f.owner.cookie)).body;current.data.invoices[0].sentDate='2026-06-01';
+ assert.equal((await f.request('/api/workspace',f.owner.cookie,{data:current.data,revision:current.revision},'PUT')).status,200);
+ current=(await f.request('/api/workspace',f.owner.cookie)).body;current.data.invoices[0].voided={date:'2026-11-01',reason:'Correct historical entry'};
+ assert.equal((await f.request('/api/workspace',f.owner.cookie,{data:current.data,revision:current.revision},'PUT')).status,200);
+ current=(await f.request('/api/workspace',f.owner.cookie)).body;const original=structuredClone(current.data.invoices[0]);
+ assert.equal((await create(current.revision)).status,200);
+ current=(await f.request('/api/workspace',f.owner.cookie)).body;
+ assert.equal(current.data.invoices.length,2);assert.deepEqual(current.data.invoices[0],original);assert.equal(current.data.invoices[1].number,original.number);assert.notEqual(current.data.invoices[1].id,original.id);assert(validBackup(current.data));
+ current.data.invoices[0].voided.reason='Changed history';
+ assert.equal((await f.request('/api/workspace',f.owner.cookie,{data:current.data,revision:current.revision},'PUT')).status,409);
+});
+
+test('invoice creation ignores unrelated saves but checks the billing data shown to the user',async t=>{
+ const f=await fixture(t),doc=(await f.request('/api/workspace',f.owner.cookie)).body,d=data();
+ const employee=doc.data.employees[0];d.employees[0]={...employee,contracts:['contract']};d.contracts[0].billing.assignments[0].employeeId=employee.id;
+ sheet(d,'may','2026-05-01',8);d.sheets[0].employeeId=employee.id;
+ assert.equal((await f.request('/api/workspace',f.owner.cookie,{data:d,revision:doc.revision},'PUT')).status,200);
+ const {governmentInvoiceBasis}=await import('../public/billing.js');
+ const base=(await f.request('/api/workspace',f.owner.cookie)).body,request={...input('2026-05'),revision:base.revision,basis:governmentInvoiceBasis(base.data,input('2026-05'))};
+ const other=structuredClone(base.data.sheets[0]);other.id='june';other.start='2026-06-01';other.rows[0].id='june-row';other.rows[0].hours={'2026-06-01':2};
+ assert.equal((await f.request('/api/workspace',f.owner.cookie,{changes:[{collection:'sheets',id:other.id,before:null,after:other}]},'PATCH')).status,200);
+ assert.equal((await f.request('/api/invoices/government',f.owner.cookie,request)).status,200);
+ let current=(await f.request('/api/workspace',f.owner.cookie)).body;
+ current.data.invoices[0].sentDate='2026-05-31';assert.equal((await f.request('/api/workspace',f.owner.cookie,{data:current.data,revision:current.revision},'PUT')).status,200);
+ current=(await f.request('/api/workspace',f.owner.cookie)).body;
+ const june={...input('2026-06'),revision:current.revision,basis:governmentInvoiceBasis(current.data,input('2026-06'))};
+ const signers=structuredClone(current.data.settings.invoiceSigners);signers[0].name='Updated signer';
+ assert.equal((await f.request('/api/workspace',f.owner.cookie,{changes:[{collection:'settings',id:'invoiceSigners',before:current.data.settings.invoiceSigners,after:signers}]},'PATCH')).status,200);
+ const blocked=await f.request('/api/invoices/government',f.owner.cookie,june);assert.equal(blocked.status,409);assert.match(blocked.body.error,/billing setup/);
+});
+
 test('record-only backfill preserves issued snapshots and stays outside future cumulative billing',()=>{
   const d=data();sheet(d,'aug','2026-08-01',10);
   const august=governmentInvoice(d,input(),'august');august.sentDate='2026-08-31';

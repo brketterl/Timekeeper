@@ -1,19 +1,47 @@
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { isGovernment, rowTerms, governmentInvoice } from '../public/billing.js';
+import { isGovernment, rowTerms, governmentInvoice, governmentInvoiceBasis, voidBlockReason } from '../public/billing.js';
 import { auditStore } from './audit.js';
 import { validBackup } from './validation.js';
+import { applyChanges } from './changes.js';
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const digest = value => createHash('sha256').update(value).digest('hex');
 const roles = ['admin', 'employee'];
-const rowView = r => ({ id: r.id, contractId: r.contractId, status: r.status, hours: r.hours, note: r.note, ...(r.taskOrderId ? { taskOrderId: r.taskOrderId, laborCategory: r.laborCategory } : {}) });
+const rowView = r => ({ id: r.id, contractId: r.contractId, status: r.status, hours: r.hours, note: r.note, ...(r.feedback ? { feedback: r.feedback } : {}), ...(r.taskOrderId ? { taskOrderId: r.taskOrderId, laborCategory: r.laborCategory } : {}) });
 const sheetView = s => ({ id: s.id, employeeId: s.employeeId, start: s.start, status: s.status, rows: s.rows.map(rowView) });
 const equal = isDeepStrictEqual;
+
+// Keep historical mixed sheets readable; changes must transition the whole period.
+function validateSheetTransition(old, sheet, role) {
+  if(sheet.rows.some(r=>!r||typeof r!=='object'))throw fail(400,'Invalid time entry fields.');
+  if(old&&equal(sheetView(old),sheetView(sheet)))return;
+  if(new Set(sheet.rows.map(r=>r.status)).size>1)throw fail(409,'Submit, approve, or return the whole timesheet together.');
+  if(!old)return;
+  const locked=old.rows.some(r=>r.status!=='draft');
+  if(!locked)return;
+  if(new Set(old.rows.map(r=>r.status)).size>1&&!(role==='admin'&&sheet.rows.every(r=>r.status==='draft')))throw fail(409,'Return this older mixed-status timesheet as a whole before editing.');
+  if(old.status==='approved'&&sheet.rows.some(r=>r.status==='submitted'))throw fail(409,'Return approved timesheets before resubmitting.');
+  if(old.rows.length!==sheet.rows.length)throw fail(403,'Locked timesheets cannot have rows added or removed.');
+  for(const previous of old.rows){
+    const row=sheet.rows.find(r=>r.id===previous.id);
+    const entry=r=>{const {status,feedback,...rest}=rowView(r);return rest};
+    if(!row||!equal(entry(previous),entry(row)))throw fail(403,'Withdraw or return the whole timesheet before editing.');
+  }
+  if(role==='employee'&&old.rows.some(r=>r.status==='approved'))throw fail(403,'Approved timesheets are locked.');
+}
 
 export function accessStore(db, { onAuditEvent, notificationStatus, retryNotifications } = {}) {
   const audit = auditStore(db, { onEvent: onAuditEvent });
   const log = (session, type, id, summary, details) => audit.record(session.workspace_id, session.user_id, type, id, summary, details);
+  const removedFeedback=(session,sheet,row)=>{
+    if(!row.feedback?.length)return [];
+    const event=db.prepare(`SELECT details FROM audit_events WHERE workspace_id=? AND entity_id=? AND event_type='timesheet.rows_removed'
+      AND json_extract(details,'$.employeeId')=? AND EXISTS(SELECT 1 FROM json_each(details,'$.feedbackRows') WHERE json_extract(value,'$.id')=?) ORDER BY id DESC LIMIT 1`)
+      .get(session.workspace_id,sheet.id,sheet.employeeId,row.id);
+    return event?JSON.parse(event.details).feedbackRows.find(r=>r.id===row.id).feedback:[];
+  };
+
   const document = workspaceId => {
     const row = db.prepare('SELECT data, revision FROM workspace_documents WHERE workspace_id = ?').get(workspaceId);
     return { data: JSON.parse(row.data), revision: row.revision };
@@ -77,19 +105,36 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
   }
   function writeAdmin(session, input, { restore = false } = {}) {
     return transaction(() => {
+      const patched=Object.hasOwn(input,'changes');
+      if(patched){const current=document(session.workspace_id);input={data:applyChanges(current.data,input.changes),revision:current.revision}}
       if (!input.data || !validBackup(input.data)) throw fail(400, 'Invalid workspace data.');
       for (const member of members(session.workspace_id)) {
         const employee = input.data.employees.find(e => e.id === member.employeeId);
         if (!employee?.active || employee.email.toLowerCase() !== member.email.toLowerCase()) throw fail(409, 'Keep linked account employee records active with their account email. Remove workspace access first to archive an employee.');
       }
       const before = document(session.workspace_id).data;
+      if(!restore)for(const sheet of input.data.sheets)validateSheetTransition(before.sheets.find(s=>s.id===sheet.id),sheet,'admin');
       for (const old of restore ? [] : before.invoices) {
         const incoming = input.data.invoices.find(i=>i.id===old.id);
-        if (old.government && old.sentDate && (!incoming || !equal({ ...old, payments: [] }, { ...incoming, payments: [] }))) throw fail(409,'Issued invoices cannot be changed or removed. Record payments separately.');
-        if (old.government && incoming && !equal({ ...old, payments: [], sentDate: null }, { ...incoming, payments: [], sentDate: null })) throw fail(409,'Government invoice snapshots cannot be edited. Delete an unsent draft and recreate it.');
+        const snapshot=invoice=>{const {payments,voided,...rest}=invoice;return rest};
+        if(old.sentDate&&(!incoming||!equal(snapshot(old),snapshot(incoming))))throw fail(409,'Sent invoices cannot be changed or deleted. Void the invoice instead.');
+        if(old.government&&incoming&&!equal({...snapshot(old),sentDate:null},{...snapshot(incoming),sentDate:null}))throw fail(409,'Government invoice snapshots cannot be edited. Delete an unsent draft and recreate it.');
+        if(!incoming)continue;
+        if(old.voided&&(!equal(old.voided,incoming.voided)||!equal(old.payments,incoming.payments)))throw fail(409,'Voided invoices cannot be changed.');
+        if(!old.voided&&incoming.voided){const reason=voidBlockReason(before,old);if(reason)throw fail(409,reason)}
+        for(const prior of old.payments){
+          const payment=incoming.payments.find(p=>p.id===prior.id);
+          if(!payment||!equal({...prior,reversed:null},{...payment,reversed:null})||(prior.reversed&&!equal(prior.reversed,payment.reversed)))throw fail(409,'Recorded payments cannot be changed or deleted. Reverse the entry instead.');
+        }
+        if(incoming.payments.some(p=>!old.payments.some(old=>old.id===p.id)&&p.reversed))throw fail(400,'Record a payment before reversing it.');
       }
+      if(!restore&&input.data.invoices.some(i=>i.voided&&!before.invoices.some(old=>old.id===i.id)))throw fail(400,'Record and send an invoice before voiding it.');
       if(!restore&&input.data.invoices.some(i=>i.government&&!before.invoices.some(old=>old.id===i.id))) throw fail(400,'Create government invoices using the monthly billing action.');
       for(const sheet of restore ? [] : input.data.sheets) for(const row of sheet.rows) {
+        const previous=before.sheets.find(s=>s.id===sheet.id)?.rows.find(r=>r.id===row.id),history=previous?.feedback||(!previous?removedFeedback(session,sheet,row):[]),feedback=row.feedback||[];
+        const returned=previous&&['submitted','approved'].includes(previous.status)&&row.status==='draft';
+        if(!equal(feedback.slice(0,history.length),history)||feedback.length!==history.length+(returned?1:0))throw fail(409,returned?'Add one correction reason when returning hours to draft.':'Reviewer feedback history cannot be changed.');
+
         const c=input.data.contracts.find(c=>c.id===row.contractId);
         if(!isGovernment(c)) continue;
         const old=before.sheets.find(s=>s.id===sheet.id)?.rows.find(r=>r.id===row.id);
@@ -100,26 +145,30 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
         } else { try { Object.assign(row,rowTerms(c,sheet.employeeId,row)); } catch(e) { throw fail(400,e.message); } }
       }
       const result = write(session.workspace_id, input.data, input.revision);
-      audit.changes(session, before, input.data);
+      audit.changes(session, before, input.data, { restored: restore });
       if(restore)log(session,'workspace.restored',session.workspace_id,'Restored workspace JSON backup');
-      return result;
+      return patched?{...result,data:read(session).data}:result;
     });
   }
   function writeEmployee(session, input) {
     return transaction(() => {
+      const patched=Object.hasOwn(input,'changes');
+      if(patched){const current=read(session);input={sheets:applyChanges(current.data,input.changes,{employee:true}).sheets,revision:current.revision}}
       if (Object.keys(input).some(k => !['sheets', 'revision'].includes(k)) || !Array.isArray(input.sheets)) throw fail(400, 'Only your timesheets may be updated.');
       const doc = document(session.workspace_id), employee = doc.data.employees.find(e => e.id === session.employee_id && e.active);
       if (!employee) throw fail(403, 'Your employee record is inactive.');
       const oldSheets = doc.data.sheets.filter(s => s.employeeId === employee.id);
-      if (oldSheets.some(old => !input.sheets.some(s => s.id === old.id))) throw fail(403, 'Existing timesheets cannot be deleted.');
+      if (oldSheets.some(old => old.rows.length && !input.sheets.some(s => s.id === old.id))) throw fail(403, 'Existing timesheets cannot be deleted.');
       const incoming = input.sheets.map(s => {
         if (!s || Object.keys(s).some(k => !['id', 'employeeId', 'start', 'status', 'rows'].includes(k)) || s.employeeId !== employee.id || !Array.isArray(s.rows)) throw fail(403, 'Only your own timesheets may be changed.');
         const old = oldSheets.find(x => x.id === s.id);
+        validateSheetTransition(old,s,'employee');
         if (old && old.start !== s.start) throw fail(403, 'Timesheet dates cannot be changed.');
         if (old?.rows.some(r => r.status !== 'draft' && !s.rows.some(row => row.id === r.id))) throw fail(403, 'Locked rows cannot be removed.');
         const rows = s.rows.map(r => {
-          if (!r || Object.keys(r).some(k => !['id', 'contractId', 'status', 'hours', 'note', 'taskOrderId', 'laborCategory'].includes(k))) throw fail(400, 'Invalid time entry fields.');
+          if (!r || Object.keys(r).some(k => !['id', 'contractId', 'status', 'hours', 'note', 'taskOrderId', 'laborCategory', 'feedback'].includes(k))) throw fail(400, 'Invalid time entry fields.');
           const previous = old?.rows.find(x => x.id === r.id);
+          if(!equal(previous?.feedback||(!previous?removedFeedback(session,s,r):[]),r.feedback||[]))throw fail(403,'Only admins can add reviewer feedback; existing feedback must be kept.');
           if (previous?.status === 'approved') {
             if (!equal(rowView(previous), r)) throw fail(403, 'Approved hours are locked.');
             return previous;
@@ -141,7 +190,7 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       doc.data.sheets = [...doc.data.sheets.filter(s => s.employeeId !== employee.id), ...incoming];
       const result = write(session.workspace_id, doc.data, input.revision);
       audit.changes(session, before, doc.data);
-      return result;
+      return patched?{...result,data:read(session).data}:result;
     });
   }
   function changeEmail(session, email, verifiedHash, sessionHash) {
@@ -174,9 +223,9 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       JOIN workspaces w ON w.id = m.workspace_id WHERE m.user_id = ? ORDER BY w.created_at, w.id`).all(session.user_id);
     if (path === '/api/invitations/accept' && method === 'POST') return transaction(() => ({ workspaceId: join(invitation(input.token), { id: session.user_id, email: session.email, name: session.name }) }));
     if (path === '/api/workspace' && method === 'GET') return read(session);
-    if (path === '/api/employee/timesheets' && method === 'PUT') {
+    if (path === '/api/employee/timesheets' && ['PUT','PATCH'].includes(method)) {
       if (session.role !== 'employee') throw fail(403, 'Employee access is required.');
-      return writeEmployee(session, input);
+      return writeEmployee(session,method==='PATCH'?{changes:input.changes}:input);
     }
     if (session.role !== 'admin') throw fail(403, 'Admin access is required.');
     const employeeMatch = /^\/api\/employees\/([a-zA-Z0-9_-]+)\/remove$/.exec(path);
@@ -202,7 +251,8 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
     });
     if (path === '/api/invoices/government' && method === 'POST') return transaction(() => {
       const doc=document(session.workspace_id),before=structuredClone(doc.data);
-      if(input.revision!==doc.revision)throw fail(409,'Workspace changed. Reload before creating this invoice.');
+      if(input.basis!==undefined){if(!equal(input.basis,governmentInvoiceBasis(doc.data,input)))throw fail(409,'The time, billing setup, or earlier invoices for this invoice changed. Reopen the invoice form to review the latest details.')}
+      else if(input.revision!==doc.revision)throw fail(409,'Workspace changed. Reload before creating this invoice.');
       let invoice;
       try { invoice=governmentInvoice(doc.data,input,randomUUID()); } catch(e) { throw fail(400,e.message); }
       const result=write(session.workspace_id,doc.data,doc.revision);
@@ -210,9 +260,19 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       return {...result,invoiceId:invoice.id};
     });
     if (path === '/api/workspace/import' && method === 'POST') return writeAdmin(session,input,{restore:true});
-    if (path === '/api/workspace' && method === 'PUT') return writeAdmin(session, input);
+    if (path === '/api/workspace' && ['PUT','PATCH'].includes(method)) return writeAdmin(session,method==='PATCH'?{changes:input.changes}:input);
     if (path === '/api/timesheet-notifications/retry' && method === 'POST') return retryNotifications(session.workspace_id);
     if (path === '/api/timesheet-notifications/status' && method === 'GET') return notificationStatus(session.workspace_id);
+    if(path==='/api/approvals'&&method==='GET'){
+      const doc=document(session.workspace_id),events=db.prepare("SELECT details,created_at FROM audit_events WHERE workspace_id=? AND entity_id=? AND event_type='timesheet.submitted' ORDER BY id DESC");
+      const entries=doc.data.sheets.filter(sheet=>sheet.rows.some(row=>row.status==='submitted')).map(sheet=>{
+        const rows=sheet.rows.filter(row=>row.status==='submitted'),history=events.all(session.workspace_id,sheet.id).map(event=>({...event,details:JSON.parse(event.details)}));
+        const submittedDates=rows.map(row=>{for(const event of history){if(!Array.isArray(event.details.rowIds))return null;if(event.details.rowIds.includes(row.id))return event.created_at}return null});
+        const person=doc.data.employees.find(e=>e.id===sheet.employeeId);
+        return {sheetId:sheet.id,employeeId:sheet.employeeId,employeeName:person.name,active:person.active,start:sheet.start,submittedHours:rows.reduce((total,row)=>total+Object.values(row.hours).reduce((n,h)=>n+h,0),0),submittedRows:rows.length,submittedAt:submittedDates.every(date=>date!==null)?Math.min(...submittedDates):null};
+      }).sort((a,b)=>a.start.localeCompare(b.start)||(a.submittedAt??0)-(b.submittedAt??0)||a.employeeName.localeCompare(b.employeeName));
+      return {entries};
+    }
     if (path === '/api/activity' && method === 'GET') return audit.list(session.workspace_id, input.before);
     if (path === '/api/members' && method === 'GET') return members(session.workspace_id);
     if (path === '/api/invitations' && method === 'GET') return db.prepare(`SELECT id, email, role, employee_id AS employeeId,

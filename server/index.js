@@ -97,7 +97,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
         return res.end(await readFile(new URL('../public/billing.js', import.meta.url)));
       }
-      if (req.method === 'GET' && ['/auth.js', '/access.js', '/backups.js', '/activity.js', '/notifications.js', '/government.js'].includes(path)) {
+      if (req.method === 'GET' && ['/auth.js', '/access.js', '/backups.js', '/activity.js', '/notifications.js', '/government.js', '/recovery.js', '/approvals.js', '/invoice-selection.js', '/mobile-timesheets.js'].includes(path)) {
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
         return res.end(await readFile(new URL(`../public${path}`, import.meta.url)));
       }
@@ -230,7 +230,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
       if (path === '/api/activity' && req.method === 'GET') input.before = new URL(req.url, 'http://localhost').searchParams.get('before');
       if (['/api/invitations', '/api/timesheet-notifications/retry'].includes(path) && req.method === 'POST') checkAuthLimit(req);
       let result = await access.route(path, req.method, session, input);
-      if ((req.method === 'PUT' && ['/api/workspace', '/api/employee/timesheets'].includes(path)) || (req.method === 'POST' && path === '/api/timesheet-notifications/retry')) void notices.checkDue();
+      if ((['PUT','PATCH'].includes(req.method) && ['/api/workspace', '/api/employee/timesheets'].includes(path)) || (req.method === 'POST' && path === '/api/timesheet-notifications/retry')) void notices.checkDue();
       if (path === '/api/invitations' && req.method === 'POST') result = await accounts.invite(result);
       if (path === '/api/invitations/accept') {
         issueSession(res, session.user_id, result.workspaceId);

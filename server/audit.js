@@ -5,12 +5,12 @@ export function auditStore(db, { onEvent = () => {} } = {}) {
   function record(workspaceId, userId, type, entityId, summary, details = {}) {
     const actor = db.prepare(`SELECT u.name, m.role FROM users u LEFT JOIN memberships m ON m.user_id=u.id AND m.workspace_id=? WHERE u.id=?`).get(workspaceId, userId);
     if (!actor?.role) throw Error('An audit actor must belong to the workspace.');
-    const safeDetails = Object.fromEntries(Object.entries(details).map(([key, value]) => [key, typeof value === 'string' ? value.slice(0, 200) : value]));
+    const safeDetails = Object.fromEntries(Object.entries(details).map(([key, value]) => [key, typeof value === 'string' ? value.slice(0, key==='reason'?500:200) : value]));
     const inserted = db.prepare(`INSERT INTO audit_events(workspace_id,actor_id,actor_name,actor_role,event_type,entity_id,summary,details,created_at)
       VALUES(?,?,?,?,?,?,?,?,?)`).run(workspaceId, userId, actor.name, actor.role, type, entityId, summary.slice(0, 500), JSON.stringify(safeDetails), Date.now());
     onEvent({ id: Number(inserted.lastInsertRowid), workspaceId, actorId: userId, type, entityId, details: safeDetails });
   }
-  function changes(session, before, after) {
+  function changes(session, before, after, { restored = false } = {}) {
     const log = (type, id, text, details) => record(session.workspace_id, session.user_id, type, id, text, details);
     for (const sheet of after.sheets) {
       const old = before.sheets.find(s => s.id === sheet.id);
@@ -18,14 +18,15 @@ export function auditStore(db, { onEvent = () => {} } = {}) {
       const transitions = new Map(); let edited = 0;
       for (const row of sheet.rows) {
         const previous = old?.rows.find(r => r.id === row.id);
+        if(previous&&(row.feedback||[]).length>(previous.feedback||[]).length)log('timesheet.feedback_added',sheet.id,`Returned hours for ${who} with correction feedback`,{employeeId:sheet.employeeId,period:sheet.start,rowId:row.id,reason:row.feedback.at(-1)});
         if (previous?.status !== row.status) {
           const action = row.status === 'submitted' ? 'submitted' : row.status === 'approved' ? 'approved' : previous?.status === 'submitted' ? 'withdrawn' : previous?.status === 'approved' ? 'reopened' : null;
           if (action) transitions.set(action, (transitions.get(action) || 0) + 1);
         } else if (previous && row.status !== 'draft' && !equal(previous, row)) edited++;
       }
-      for (const [action, count] of transitions) log(`timesheet.${action}`, sheet.id, `${action[0].toUpperCase() + action.slice(1)} hours for ${who}`, { employeeId: sheet.employeeId, period: sheet.start, rows: count });
+      for (const [action, count] of transitions) log(`timesheet.${action}`, sheet.id, `${action[0].toUpperCase() + action.slice(1)} hours for ${who}`, { employeeId: sheet.employeeId, period: sheet.start, rows: count, ...(action==='submitted'&&!restored?{rowIds:sheet.rows.filter(row=>row.status==='submitted'&&old?.rows.find(r=>r.id===row.id)?.status!=='submitted').map(row=>row.id)}:{})});
       const removed = old?.rows.filter(row => !sheet.rows.some(r => r.id === row.id)).length || 0;
-      if (removed) log('timesheet.rows_removed', sheet.id, `Removed time entries for ${who}`, { employeeId: sheet.employeeId, period: sheet.start, rows: removed });
+      if (removed) log('timesheet.rows_removed', sheet.id, `Removed time entries for ${who}`, { employeeId: sheet.employeeId, period: sheet.start, rows: removed, feedbackRows: old.rows.filter(row=>row.feedback?.length&&!sheet.rows.some(r=>r.id===row.id)).map(row=>({id:row.id,feedback:row.feedback})) });
       if (edited) log('timesheet.updated', sheet.id, `Updated locked or submitted hours for ${who}`, { employeeId: sheet.employeeId, period: sheet.start, rows: edited });
     }
     for (const old of before.sheets) if (!after.sheets.some(s => s.id === old.id)) log('timesheet.deleted', old.id, 'Removed timesheet', { employeeId: old.employeeId, period: old.start });
@@ -33,8 +34,10 @@ export function auditStore(db, { onEvent = () => {} } = {}) {
       const old = before.invoices.find(i => i.id === invoice.id), info = { number: invoice.number, ...(invoice.government?.historicalRecord ? { historicalRecord: true } : {}) };
       if (!old) log('invoice.created', invoice.id, `Created invoice ${invoice.number}`, info);
       else if (!equal({ ...old, payments: [] }, { ...invoice, payments: [] })) log('invoice.updated', invoice.id, `Updated invoice ${invoice.number}`, info);
+      if(!old?.voided&&invoice.voided)log('invoice.voided',invoice.id,`Voided invoice ${invoice.number}`,{...info,...invoice.voided});
       for (const payment of invoice.payments) {
         const previous = old?.payments.find(p => p.id === payment.id);
+        if(previous&&!previous.reversed&&payment.reversed)log('payment.reversed',payment.id,`Reversed payment entry for invoice ${invoice.number}`,{invoiceId:invoice.id,amount:payment.amount,...payment.reversed});
         if (!previous || !equal(previous, payment)) log(previous ? 'payment.updated' : 'payment.recorded', payment.id,
           `${previous ? 'Updated' : 'Recorded'} payment for invoice ${invoice.number}`, { invoiceId: invoice.id, number: invoice.number, amount: payment.amount, date: payment.date });
       }

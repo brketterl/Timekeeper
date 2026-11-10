@@ -15,7 +15,7 @@ async function register(page, name, address) {
   await page.getByLabel('Email', { exact: true }).fill(address);
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
-  await expect(page.getByRole('navigation')).toBeVisible();
+  await expect(page.locator('.topbar')).toBeVisible();
 }
 async function invite(page, address, role) {
   await page.locator('nav button[title=Team]').click();
@@ -25,7 +25,7 @@ async function invite(page, address, role) {
   return page.locator('#invite-result input').inputValue();
 }
 
-test('employee invitation, restricted time entry, approval, and shared partner access', async ({ page, browser }) => {
+test('employee invitation, restricted time entry, approval, and shared partner access', async ({ page, browser }, info) => {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('/');
@@ -51,7 +51,7 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await page.getByRole('button', { name: 'Save employee', exact: true }).click();
   await saved(page);
 
-  const workerContext = await browser.newContext();
+  const workerContext = await browser.newContext({viewport:{width:390,height:844}});
   const worker = await workerContext.newPage();
   worker.on('pageerror', error => errors.push(error.message));
   await worker.goto(await invite(page, workerEmail, 'employee'));
@@ -60,6 +60,14 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await expect(worker.locator('.workspace small')).toHaveText('Employee');
   await expect(worker.locator('nav button[title=Activity]')).toHaveCount(0);
   await expect(worker.locator('nav button')).toHaveText(['Timesheets', 'Contracts']);
+  await expect(worker.getByRole('button',{name:/Menu/})).toHaveAttribute('aria-expanded','false');
+  await worker.getByRole('button',{name:/Menu/}).click();await expect(worker.getByRole('navigation')).toBeVisible();
+  await worker.keyboard.press('Escape');await expect(worker.getByRole('button',{name:/Menu/})).toHaveAttribute('aria-expanded','false');
+  await worker.getByRole('button',{name:/Menu/}).click();await worker.locator('nav button[title=Contracts]').click();
+  await expect(worker.getByRole('heading',{name:'Your assigned contracts',exact:true})).toBeVisible();
+  await worker.getByRole('button',{name:/Menu/}).click();await worker.locator('nav button[title=Timesheets]').click();
+  await expect(worker.locator('.mobile-timesheet')).toBeVisible();
+
   const employeeData = await (await worker.request.get('http://127.0.0.1:3100/api/workspace')).json();
   expect(employeeData.data.employees).toHaveLength(1);
   expect(employeeData.data.contracts[0]).not.toHaveProperty('rate');
@@ -72,15 +80,56 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await saved(worker);
   await worker.getByRole('button', { name: 'Submit timesheet' }).click();
   await saved(worker);
+  await expect(worker.getByRole('group', { name: 'Timesheet status' })).toHaveText('Submitted');
+  await expect(worker.getByRole('button', { name: 'Withdraw submission', exact: true })).toBeVisible();
   await expect.poll(async () => (await inboxEmails(page, adminEmail)).filter(email => email.subject.includes('submitted for review')).length).toBe(1);
+  await worker.getByRole('button', { name: 'Withdraw submission', exact: true }).click();
+  await saved(worker);
+  await expect(worker.getByRole('group', { name: 'Timesheet status' })).toHaveText('Draft');
+  await expect(worker.locator('input[type=number]').first()).toBeEnabled();
+  await worker.getByRole('button', { name: 'Submit timesheet', exact: true }).click();
+  await saved(worker);
+
 
   await page.reload();
   await page.getByRole('button', { name: 'Review', exact: true }).click();
-  await page.getByRole('button', { name: 'Approve submitted hours', exact: true }).click();
+  await page.getByRole('button', { name: 'Return timesheet for changes', exact: true }).click();
+  await page.getByLabel('What needs to change?', { exact: true }).fill('   ');
+  await page.getByRole('button', { name: 'Return timesheet', exact: true }).click();
+  await expect(page.locator('#form-error')).toContainText('Explain what needs to change.');
+  await page.getByLabel('What needs to change?', { exact: true }).fill('Explain the work performed on the report.');
+  await page.getByRole('button', { name: 'Return timesheet', exact: true }).click();
+  await saved(page);
+  await worker.reload();
+  await expect(worker.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Explain the work performed on the report.');
+  await worker.screenshot({ path: info.outputPath('employee-feedback.png'), fullPage: true });
+  await worker.setViewportSize({ width: 390, height: 844 });
+  await worker.screenshot({ path: info.outputPath('employee-feedback-mobile.png'), fullPage: true });
+  const feedbackBounds=await worker.getByRole('note', { name: 'Reviewer feedback' }).boundingBox();
+  expect(feedbackBounds.x+feedbackBounds.width).toBeLessThanOrEqual(390);
+  await worker.setViewportSize({ width: 1280, height: 720 });
+  await worker.getByRole('button', { name: 'Remove Shared project row', exact: true }).click();
+  await worker.getByRole('button', { name: 'Confirm', exact: true }).click();await saved(worker);
+  await worker.getByRole('button', { name: 'Undo', exact: true }).click();await saved(worker);
+  await expect(worker.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Explain the work performed on the report.');
+  await worker.getByRole('button', { name: 'Add note', exact: true }).click();
+  await worker.locator('#row-note').fill('Prepared the weekly progress report.');
+  await worker.getByRole('button', { name: 'Save note', exact: true }).click();
+  await saved(worker);
+  await worker.getByRole('button', { name: 'Resubmit timesheet', exact: true }).click();
+  await saved(worker);
+  await expect(worker.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Resubmitted');
+  await page.reload();
+  await page.getByRole('button', { name: 'Review', exact: true }).click();
+  await expect(page.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Explain the work performed on the report.');
+  await page.getByRole('button', { name: 'Approve timesheet', exact: true }).click();
   await saved(page);
   await expect.poll(async () => (await inboxEmails(worker, workerEmail)).filter(email => email.subject.includes('hours were approved')).length).toBe(1);
   await worker.reload();
   await expect(worker.locator('input[type=number]').first()).toBeDisabled();
+  await expect(worker.getByRole('button', { name: 'Reopen row', exact: true })).toHaveCount(0);
+  await expect(worker.getByRole('button', { name: 'Add contract', exact: true })).toHaveCount(0);
+  await expect(worker.getByRole('note', { name: 'Reviewer feedback' })).toContainText('Reviewer feedback history');
 
   const partnerEmail = email('partner');
   const partnerContext = await browser.newContext();
@@ -96,6 +145,12 @@ test('employee invitation, restricted time entry, approval, and shared partner a
   await page.reload();
   await page.locator('nav button[title=Settings]').click();
   await expect(page.locator('input[name=business]')).toHaveValue('Shared test business');
+  await page.locator('nav button[title=Activity]').click();
+  const removedFeedback=page.locator('#activity-list article').filter({hasText:'Feedback from removed rows'});
+  await removedFeedback.getByText('Feedback from removed rows', {exact:true}).click();
+  await expect(removedFeedback).toContainText('Explain the work performed on the report.');
+  await expect(page.locator('#activity-list article').filter({hasText:'Returned hours for'}).first()).toContainText('Explain the work performed on the report.');
+
   expect(errors).toEqual([]);
   await workerContext.close(); await partnerContext.close();
 });
@@ -269,7 +324,9 @@ test('government invoice setup creates a highlighted monthly PDF with locked cum
   future.data.invoices[0].issued='2099-11-01';future.data.invoices[0].due='2099-12-01';
   const restored=await page.request.post('/api/workspace/import',{headers:{Origin:'http://127.0.0.1:3100'},data:{data:future.data,revision:future.revision}});
   expect(restored.status()).toBe(200);
-  await page.reload();await page.waitForFunction(()=>state.invoices.length>0);await page.evaluate(()=>invoiceDetail(state.invoices[0].id));
+  await page.reload();
+  await expect(page.getByRole('navigation')).toBeVisible();
+  await page.evaluate(()=>invoiceDetail(state.invoices[0].id));
   await page.getByRole('button',{name:/^Mark sent/}).click();
   await page.locator('#send-form [name=date]').fill('2026-10-28');
   await page.getByRole('button',{name:'Mark sent',exact:true}).click();await saved(page);
@@ -303,4 +360,296 @@ test('government invoice setup creates a highlighted monthly PDF with locked cum
   expect(history.payments[0].amount).toBe(116000);
 
 
+  await page.evaluate(()=>invoiceDetail(state.invoices[0].id));
+
+  // Re-enter a voided historical invoice without changing its external number.
+  await page.getByRole('button',{name:'Void invoice',exact:true}).click();
+  await page.locator('#correction-form [name=reason]').fill('Correct historical invoice entry.');
+  await page.getByRole('button',{name:'Void invoice',exact:true}).click();await saved(page);
+  await page.getByRole('button',{name:'Close dialog'}).click();
+  await page.locator('nav button[title=Invoices]').click();
+  await page.getByRole('button',{name:'Create invoice',exact:true}).click();
+  await page.locator('#invoice-form [name=billingMonth]').fill('2026-08');
+  await page.locator('#invoice-form [name=invoiceNumber]').fill('C&C-TEST030');
+  await page.locator('#invoice-form [name=issued]').fill('2026-08-31');
+  await page.locator('#invoice-form [name=due]').fill('2026-09-30');
+  await page.getByRole('button',{name:'Create draft',exact:true}).click();
+  await expect(page.getByRole('heading',{name:'C&C-TEST030',exact:true})).toBeVisible();await saved(page);
+  await page.reload();await expect(page.getByRole('navigation')).toBeVisible();
+  const replaced=await (await page.request.get('/api/workspace')).json();
+  expect(replaced.data.invoices.map(i=>i.number)).toEqual(['C&C-TEST030','C&C-TEST030']);
+  expect(replaced.data.invoices[0].voided.reason).toBe('Correct historical invoice entry.');
+  expect(replaced.data.invoices[1].voided).toBeUndefined();
+  expect(replaced.data.invoices[1].government.cumulativeHours).toBe(12);
+
+});
+
+
+test('whole timesheet submission, return, resubmission and approval lock every row', async ({page},info)=>{
+ await page.goto('/');await register(page,'Period reviewer',email('whole-sheet'));
+ await page.evaluate(()=>{state=retainAccounts(seed());save();openSheet('e1',periodFor(today()))});await saved(page);
+ const rows=page.locator('.time-table tbody tr');
+ await page.getByRole('button',{name:'Submit timesheet',exact:true}).click();await saved(page);
+ await expect(page.locator('.time-table input:enabled')).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'Add contract',exact:true})).toHaveCount(0);
+ await page.getByRole('button',{name:'Return timesheet for changes',exact:true}).click();
+ await page.getByLabel('What needs to change?',{exact:true}).fill('Check both projects.');
+ await page.getByRole('button',{name:'Return timesheet',exact:true}).click();await saved(page);
+ await expect(page.getByRole('group',{name:'Timesheet status'})).toHaveText('Returned');
+ await expect(rows.nth(0).locator('input').first()).toBeEnabled();await expect(rows.nth(1).locator('input').first()).toBeEnabled();
+ await page.getByRole('button',{name:'Resubmit timesheet',exact:true}).click();await saved(page);
+ await page.getByRole('button',{name:'Approve timesheet',exact:true}).click();await saved(page);
+ await expect(page.getByRole('group',{name:'Timesheet status'})).toHaveText('Approved');
+ await expect(page.locator('.time-table input:enabled')).toHaveCount(0);
+ await page.screenshot({path:info.outputPath('whole-timesheet-desktop.png'),fullPage:true});
+ await page.setViewportSize({width:390,height:844});
+ await expect(page.getByRole('group',{name:'Timesheet status'})).toHaveText('Approved');
+ await expect(page.locator('.mobile-time-entry input:enabled')).toHaveCount(0);
+ await page.screenshot({path:info.outputPath('whole-timesheet-mobile.png'),fullPage:true});
+});
+
+test('legacy mixed sheets explain recovery and preserve invoiced hours', async ({page})=>{
+ await page.goto('/');await register(page,'Legacy reviewer',email('legacy'));
+ await page.evaluate(async()=>{
+  state=retainAccounts(seed());const sheet=state.sheets.find(s=>s.id==='old0');
+  sheet.rows.push({id:'legacy-draft',contractId:'c1',rate:12500,status:'draft',note:'Keep this',hours:{[sheet.start]:1}});refreshSheet(sheet);
+  await api('/api/workspace/import',{method:'POST',body:JSON.stringify({data:state,revision})});await loadWorkspace();openSheet(sheet.employeeId,sheet.start);
+ });
+ await expect(page.locator('.note[role=status]')).toContainText('older timesheet has mixed row statuses');
+ await expect(page.locator('.time-table input:enabled')).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'Return timesheet for changes',exact:true})).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'Reopen row',exact:true})).toHaveCount(0);
+ await page.getByRole('button',{name:'View invoice',exact:true}).click();await expect(page.getByRole('dialog')).toContainText('INV-1001');
+});
+
+test('payment reversal and invoice void retain history and release hours for rebilling', async ({ page }, info) => {
+  await page.goto('/');await register(page,'Recovery admin',email('recovery'));
+  await page.evaluate(()=>{state=retainAccounts(seed());save();view='invoices';render();invoiceDetail('i0')});await saved(page);
+  await page.getByRole('button',{name:'Void invoice',exact:true}).click();
+  await expect(page.getByRole('dialog')).toContainText('Reverse recorded payments before voiding');
+  await page.getByRole('button',{name:'Back to invoice',exact:true}).click();
+  await page.getByRole('button',{name:'Reverse payment entry',exact:true}).click();
+  await page.getByLabel('Reason',{exact:true}).fill('Duplicate payment entry');
+  await page.getByRole('button',{name:'Reverse entry',exact:true}).click();await saved(page);
+  await expect(page.getByRole('dialog')).toContainText('Duplicate payment entry');
+  await expect(page.getByRole('button',{name:'Record payment',exact:true})).toBeVisible();
+  await expect(page.locator('.invoice-totals .total')).toContainText('$6,000.00');
+  await page.getByRole('button',{name:'Void invoice',exact:true}).click();
+  await page.getByLabel('Reason',{exact:true}).fill('Wrong invoice sent');
+  await page.getByRole('button',{name:'Void invoice',exact:true}).click();await saved(page);
+  await expect(page.getByRole('dialog')).toContainText('VOIDED');
+  await expect(page.locator('.invoice-totals .total')).toContainText('$0.00');
+  await page.evaluate(()=>{window.print=()=>{}});
+  await page.getByRole('button',{name:'Print / PDF',exact:true}).click();
+  await expect(page.locator('#print-area')).toContainText('VOIDED');
+  await expect(page.getByRole('button',{name:'Record payment',exact:true})).toHaveCount(0);
+  await page.screenshot({path:info.outputPath('voided-invoice.png'),fullPage:true});
+  await page.getByRole('button',{name:'Close dialog'}).click();
+  await page.getByRole('button',{name:'Voided',exact:true}).click();
+  await expect(page.locator('#invoice-results')).toContainText('INV-1001');
+  await page.getByRole('button',{name:'Create invoice',exact:true}).click();
+  await page.locator('#invoice-form [name=contract]').selectOption('c1');
+  await expect(page.locator('#invoice-preview')).toContainText('48 hours');
+  await page.getByRole('button',{name:'Create draft',exact:true}).click();await saved(page);
+  await page.getByRole('button',{name:'Delete draft',exact:true}).click();
+  await page.getByRole('button',{name:'Confirm',exact:true}).click();await saved(page);
+  await page.reload();await expect(page.getByRole('navigation')).toBeVisible();
+  const doc=await (await page.request.get('/api/workspace')).json();
+  expect(doc.data.invoices.find(i=>i.id==='i0').voided.reason).toBe('Wrong invoice sent');
+  expect(doc.data.invoices.find(i=>i.id==='i0').payments[0].reversed.reason).toBe('Duplicate payment entry');
+  expect(doc.data.invoices).toHaveLength(3);
+});
+
+test('draft row undo, empty sheet deletion, contract archive and unused deletion', async ({ page }) => {
+  await page.goto('/');await register(page,'Draft admin',email('draft-recovery'));
+  await page.evaluate(()=>{state=retainAccounts(seed());currentSheet(true);save();openSheet('e1',periodFor(today()))});await saved(page);
+  const original=await (await page.request.get('/api/workspace')).json();
+  await page.getByRole('button',{name:'Remove Website & digital strategy row',exact:true}).click();
+  await page.getByRole('button',{name:'Confirm',exact:true}).click();await saved(page);
+  await page.getByRole('button',{name:'Undo',exact:true}).click();await saved(page);
+  expect((await (await page.request.get('/api/workspace')).json()).data.sheets.find(s=>s.id==='s1').rows).toEqual(original.data.sheets.find(s=>s.id==='s1').rows);
+  await page.locator('nav button[title=Timesheets]').click();
+  await page.getByRole('combobox',{name:'Timesheet employee'}).selectOption(await page.evaluate(()=>linkedEmployeeId));
+  await page.getByRole('button',{name:'Delete empty timesheet',exact:true}).click();
+  await page.getByRole('button',{name:'Confirm',exact:true}).click();await saved(page);
+  await expect(page.getByRole('button',{name:'Delete empty timesheet',exact:true})).toHaveCount(0);
+  await page.locator('nav button[title=Contracts]').click();
+  await page.locator('.contract-card').filter({hasText:'Website & digital strategy'}).getByRole('button',{name:/Manage/}).click();
+  await expect(page.getByRole('button',{name:'Delete unused contract',exact:true})).toHaveCount(0);
+  await page.getByRole('button',{name:'Archive contract',exact:true}).click();await page.getByRole('button',{name:'Confirm',exact:true}).click();await saved(page);
+  await expect(page.locator('.contract-card').filter({hasText:'Website & digital strategy'})).toHaveCount(0);
+  await page.getByLabel('Show archived contracts').check();
+  await page.locator('.contract-card').filter({hasText:'Website & digital strategy'}).getByRole('button',{name:/Manage/}).click();
+  await page.getByRole('button',{name:'Restore contract',exact:true}).click();await page.getByRole('button',{name:'Confirm',exact:true}).click();await saved(page);
+  await page.getByRole('button',{name:'New contract',exact:true}).first().click();
+  await page.locator('#contract-form [name=name]').fill('Accidental contract');await page.locator('#contract-form [name=client]').fill('Test client');
+  await page.getByRole('button',{name:'Save contract',exact:true}).click();await saved(page);
+  await page.locator('.contract-card').filter({hasText:'Accidental contract'}).getByRole('button',{name:/Manage/}).click();
+  await page.getByRole('button',{name:'Delete unused contract',exact:true}).click();await page.getByRole('button',{name:'Confirm',exact:true}).click();await saved(page);
+  await expect(page.locator('.contract-card').filter({hasText:'Accidental contract'})).toHaveCount(0);
+  await page.locator('nav button[title=Settings]').click();
+  await page.getByRole('button',{name:'Reload sample workspace',exact:true}).click();
+  await page.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(page.getByRole('heading',{name:'Everything, in good time.',exact:true})).toBeVisible();
+  await page.locator('nav button[title=Settings]').click();
+  await page.getByRole('button',{name:'Start an empty workspace',exact:true}).click();
+  await page.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect.poll(async()=> (await (await page.request.get('/api/workspace')).json()).data.invoices.length).toBe(0);
+
+});
+
+test('approval queue finds older timesheets, opens the right period and removes reviewed entries', async ({page},info)=>{
+ await page.goto('/');await register(page,'Queue reviewer',email('approval-queue'));
+ await page.evaluate(()=>{
+  state=retainAccounts(seed());
+  const old=state.sheets.find(s=>s.id==='old0');state.invoices=state.invoices.filter(i=>i.id!=='i0');
+  old.rows=[{id:'old-submitted',contractId:'c1',rate:12500,status:'submitted',note:'',hours:{[old.start]:2}}];refreshSheet(old);save();render();
+ });await saved(page);
+ await page.locator('nav button[title=Approvals]').click();
+ const rows=page.locator('.approval-table tbody tr');await expect(rows).toHaveCount(2);
+ await expect(rows.first()).toContainText('You');await expect(rows.first()).toContainText('2 hrs');await expect(rows.first()).not.toContainText('51 hrs');
+ await expect(rows.first()).toContainText('Under 1 day');
+ await page.screenshot({path:info.outputPath('approval-queue-desktop.png'),fullPage:true});
+ await page.setViewportSize({width:390,height:844});await page.screenshot({path:info.outputPath('approval-queue-mobile.png'),fullPage:true});
+ const reviewBounds=await rows.first().getByRole('button',{name:/Review/}).boundingBox();expect(reviewBounds.x+reviewBounds.width).toBeLessThanOrEqual(390);
+ await page.setViewportSize({width:1280,height:720});
+ await page.getByRole('searchbox',{name:'Search approvals'}).fill('Maya');await expect(rows).toHaveCount(1);await expect(rows.first()).toContainText('Maya Chen');
+ await page.getByRole('searchbox',{name:'Search approvals'}).fill('no such employee');await expect(page.locator('#approval-results')).toContainText('No matching submissions');
+ await page.getByRole('searchbox',{name:'Search approvals'}).fill('');
+ const expected=await page.evaluate(()=>({start:state.sheets.find(s=>s.id==='old0').start,range:range(state.sheets.find(s=>s.id==='old0').start)}));
+ await rows.first().getByRole('button',{name:/Review/}).click();
+ await expect(page.getByRole('combobox',{name:'Timesheet employee'})).toHaveValue('e1');await expect(page.locator('.period-nav strong')).toHaveText(expected.range);
+ await page.getByRole('button',{name:'Approve timesheet',exact:true}).click();await saved(page);
+ await page.getByRole('button',{name:'Back to approvals',exact:false}).click();await expect(rows).toHaveCount(1);await expect(rows.first()).toContainText('Maya Chen');
+ await rows.first().getByRole('button',{name:/Review/}).click();
+ await page.getByRole('button',{name:'Return timesheet for changes',exact:true}).click();
+ await page.getByLabel('What needs to change?',{exact:true}).fill('Clarify the work performed.');await page.getByRole('button',{name:'Return timesheet',exact:true}).click();await saved(page);
+ await page.getByRole('button',{name:'Back to approvals',exact:false}).click();await expect(page.locator('#approval-results')).toContainText('All caught up');
+ await page.reload();await page.locator('nav button[title=Approvals]').click();await expect(page.locator('#approval-results')).toContainText('All caught up');
+ const current=await (await page.request.get('/api/workspace')).json();
+ current.data.sheets.push({id:'concurrent-review',employeeId:'e2',start:'2026-09-16',status:'submitted',rows:[{id:'concurrent-row',contractId:'c1',rate:12500,status:'submitted',note:'',hours:{'2026-09-16':1}}]});
+ let committed=await page.request.put('/api/workspace',{headers:{Origin:'http://127.0.0.1:3100'},data:{data:current.data,revision:current.revision}});expect(committed.status()).toBe(200);
+ await page.getByRole('button',{name:'Refresh approvals',exact:true}).click();await expect(rows).toHaveCount(1);
+ const changed=await (await page.request.get('/api/workspace')).json();const pending=changed.data.sheets.find(s=>s.id==='concurrent-review');pending.status=pending.rows[0].status='approved';
+ committed=await page.request.put('/api/workspace',{headers:{Origin:'http://127.0.0.1:3100'},data:{data:changed.data,revision:changed.revision}});expect(committed.status()).toBe(200);
+ await rows.first().getByRole('button',{name:/Review/}).click();await expect(page.locator('#approval-results')).toContainText('All caught up');await expect(page.locator('#toast')).toContainText('already been reviewed or withdrawn');
+
+});
+
+test('standard invoice selection limits periods and entries and edits drafts in place', async({page},info)=>{
+ await page.goto('/');await register(page,'Selection reviewer',email('invoice-selection'));
+ await page.evaluate(async()=>{
+  state=retainAccounts(seed());const sheet=state.sheets.find(s=>s.id==='s1');
+  sheet.rows=[['select-a','approved',2],['select-b','approved',3],['skip-draft','draft',1],['skip-submitted','submitted',1]].map(([id,status,value])=>({id,contractId:'c1',rate:12500,status,note:id,hours:{[sheet.start]:value}}));refreshSheet(sheet);
+  const maya=state.sheets.find(s=>s.id==='s2');maya.rows[0].status='approved';maya.rows[0].hours={[maya.start]:4};refreshSheet(maya);
+  const older=state.sheets.find(s=>s.id==='old0');older.rows.push({id:'older-unbilled',contractId:'c1',rate:12500,status:'approved',note:'Historical extra work',hours:{[older.start]:1}});await api('/api/workspace/import',{method:'POST',body:JSON.stringify({data:state,revision})});await loadWorkspace();view='invoices';render();
+ });await saved(page);
+ const periods=await page.evaluate(()=>({current:state.sheets.find(s=>s.id==='s1').start,older:state.sheets.find(s=>s.id==='old0').start}));
+ await page.getByRole('button',{name:'Create invoice',exact:true}).click();
+ await expect(page.locator('#invoice-form [name=sourcePeriod]')).toHaveValue(periods.current);
+ await expect(page.locator('#invoice-entry-list input')).toHaveCount(3);await expect(page.locator('#invoice-preview')).toContainText('9 hours');
+ await page.getByRole('button',{name:'Clear selection',exact:true}).click();await expect(page.getByRole('button',{name:'Create draft',exact:true})).toBeDisabled();
+ await page.locator('#invoice-entry-list input[value="s1|select-a"]').check();await expect(page.locator('#invoice-preview')).toContainText('2 hours');
+ await page.screenshot({path:info.outputPath('invoice-selection-desktop.png'),fullPage:true});
+ await page.setViewportSize({width:390,height:844});await page.screenshot({path:info.outputPath('invoice-selection-mobile.png'),fullPage:true});
+ const modalBounds=await page.getByRole('dialog').boundingBox();expect(modalBounds.x+modalBounds.width).toBeLessThanOrEqual(390);await expect(page.getByRole('button',{name:'Create draft',exact:true})).toBeInViewport();await expect(page.locator('#invoice-footer-summary')).toContainText('$250.00');
+ await page.setViewportSize({width:1280,height:720});
+ await page.getByRole('button',{name:'Create draft',exact:true}).click();await saved(page);
+ const created=await (await page.request.get('/api/workspace')).json(),invoice=created.data.invoices.at(-1);
+ expect(invoice.lines.flatMap(line=>line.sources)).toEqual([{sheetId:'s1',rowId:'select-a'}]);
+ await page.getByRole('button',{name:'Edit draft',exact:true}).click();await expect(page.locator('#invoice-form [name=contract]')).toBeDisabled();
+ await page.locator('#invoice-form [name=note]').fill('Unsaved edit');await page.getByRole('button',{name:'Cancel',exact:true}).click();
+ expect((await (await page.request.get('/api/workspace')).json()).data.invoices.at(-1)).toEqual(invoice);
+ await page.getByRole('button',{name:'Edit draft',exact:true}).click();
+ await page.locator('#invoice-form [name=note]').fill('Corrected invoice note');await page.getByRole('button',{name:'Save draft',exact:true}).click();await saved(page);
+ const noteOnly=(await (await page.request.get('/api/workspace')).json()).data.invoices.at(-1);expect(noteOnly.lines).toEqual(invoice.lines);expect(noteOnly.business).toEqual(invoice.business);
+ await page.getByRole('button',{name:'Edit draft',exact:true}).click();await page.locator('#invoice-form [name=sourcePeriod]').selectOption('all');await expect(page.locator('#invoice-preview')).toContainText('10 hours');
+ await page.getByRole('button',{name:'Clear selection',exact:true}).click();await page.locator('#invoice-entry-list input[value="s1|select-b"]').check();await page.locator('#invoice-entry-list input[value="old0|older-unbilled"]').check();
+ await expect(page.locator('#invoice-preview')).toContainText('4 hours');
+ await page.locator('#invoice-form [name=client]').fill('Corrected client name');await page.locator('#invoice-form [name=email]').fill('corrected@example.test');await page.locator('#invoice-form [name=address]').fill('Corrected billing address');
+ await page.getByRole('button',{name:'Save draft',exact:true}).click();await saved(page);
+ const edited=(await (await page.request.get('/api/workspace')).json()).data.invoices.at(-1);
+ expect(edited.id).toBe(invoice.id);expect(edited.number).toBe(invoice.number);expect(edited.lines.map(line=>line.sources[0].rowId).sort()).toEqual(['older-unbilled','select-b']);expect(edited.address).toBe('Corrected billing address');
+ await page.getByRole('button',{name:/^Mark sent/}).click();await page.getByRole('button',{name:'Mark sent',exact:true}).click();await saved(page);await expect(page.getByRole('button',{name:'Edit draft',exact:true})).toHaveCount(0);
+ await page.getByRole('button',{name:'Close dialog'}).click();await page.getByRole('button',{name:'Create invoice',exact:true}).click();await expect(page.locator('#invoice-preview')).toContainText('6 hours');await expect(page.locator('#invoice-entry-list input')).toHaveCount(2);
+ await page.getByRole('button',{name:'Cancel',exact:true}).click();await page.reload();await expect(page.getByRole('navigation')).toBeVisible();
+ const persisted=(await (await page.request.get('/api/workspace')).json()).data.invoices.find(i=>i.id===invoice.id);expect(persisted.lines).toEqual(edited.lines);expect(persisted.client).toBe('Corrected client name');
+});
+
+test('mobile day entry validates hours, preserves dates and grid data, and handles leap-day boundaries',async({page},info)=>{
+ await page.goto('/');await register(page,'Mobile admin',email('mobile-day'));
+ await page.evaluate(()=>{
+  state=retainAccounts(seed());const s=state.sheets.find(s=>s.id==='s1');s.rows.forEach(row=>{row.hours={};row.status='draft'});refreshSheet(s);save();openSheet('e1',s.start);
+ });await saved(page);
+ await page.setViewportSize({width:320,height:844});await expect(page.locator('.mobile-timesheet')).toBeVisible();
+ const firstDay=await page.evaluate(()=>period);await page.locator('#timesheet-day').fill(firstDay);await page.locator('#timesheet-day').press('Tab');
+ const day=firstDay,rows=page.locator('.mobile-time-entry');
+ await rows.nth(0).getByRole('spinbutton').fill('8.25');await rows.nth(0).getByRole('spinbutton').press('Tab');await saved(page);
+ await rows.nth(1).getByRole('spinbutton').fill('2');await rows.nth(1).getByRole('spinbutton').press('Tab');await saved(page);
+ await expect(page.locator('#mobile-day-total')).toHaveText('10.25');await expect(page.locator('#mobile-period-total')).toHaveText('10.25');
+ await rows.nth(1).getByRole('spinbutton').fill('20');await rows.nth(1).getByRole('spinbutton').press('Tab');await expect(rows.nth(1).getByRole('spinbutton')).toHaveValue('2');await expect(page.locator('#toast')).toContainText('Daily totals cannot exceed 24');
+ await rows.nth(0).getByRole('spinbutton').fill('8.1');await rows.nth(0).getByRole('spinbutton').press('Tab');await expect(rows.nth(0).getByRole('spinbutton')).toHaveValue('8.25');
+ await page.getByRole('button',{name:'Next day',exact:true}).click();await expect(page.locator('#mobile-day-total')).toHaveText('0');
+ await rows.nth(0).getByRole('spinbutton').fill('1.5');await rows.nth(0).getByRole('spinbutton').press('Tab');await saved(page);await expect(page.locator('#mobile-period-total')).toHaveText('11.75');
+ await rows.nth(0).getByRole('spinbutton').fill('1.75');
+ await page.setViewportSize({width:1280,height:900});await expect(page.locator('.time-table')).toBeVisible();await saved(page);
+ await page.setViewportSize({width:320,height:844});await expect(page.locator('.mobile-timesheet')).toBeVisible();await expect(rows.nth(0).getByRole('spinbutton')).toHaveValue('1.75');await expect(page.locator('#mobile-period-total')).toHaveText('12');
+ await page.getByRole('button',{name:'Previous day',exact:true}).click();await expect(page.locator('#timesheet-day')).toHaveValue(day);await expect(rows.nth(0).getByRole('spinbutton')).toHaveValue('8.25');
+ await expect(page.locator('#toast')).toBeEmpty({timeout:5000});
+ await page.screenshot({path:info.outputPath('mobile-day-320.png'),fullPage:true});
+ expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+ await page.getByRole('button',{name:'Grid view',exact:true}).click();await expect(page.locator('.time-table')).toBeVisible();expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+ await page.getByRole('button',{name:'Day view',exact:true}).click();await expect(rows.nth(0).getByRole('spinbutton')).toHaveValue('8.25');
+ await page.getByRole('button',{name:/Menu/}).click();await expect(page.locator('nav button[title=Approvals]')).toBeVisible();await page.screenshot({path:info.outputPath('mobile-menu.png'),fullPage:true});
+ await page.getByRole('button',{name:'My account',exact:true}).click();await expect(page.getByRole('dialog')).toBeVisible();await page.getByRole('button',{name:'Close dialog'}).click();
+ await page.setViewportSize({width:768,height:1024});await expect(page.locator('.mobile-timesheet')).toBeVisible();await page.screenshot({path:info.outputPath('mobile-day-tablet.png'),fullPage:true});expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(768);
+ await page.evaluate(()=>{timesheetMode='auto';const sheet={id:'mobile-leap',employeeId:'e1',start:'2028-02-16',status:'draft',rows:[{id:'leap-row',contractId:'c1',rate:12500,status:'draft',note:'',hours:{}}]};state.sheets.push(sheet);save();openSheet('e1',sheet.start)});await saved(page);
+ await page.locator('#timesheet-day').fill('2028-02-29');await page.locator('#timesheet-day').press('Tab');await expect(page.getByRole('button',{name:'Next day',exact:true})).toBeDisabled();
+ await rows.nth(0).getByRole('spinbutton').fill('4');await rows.nth(0).getByRole('spinbutton').press('Tab');await saved(page);
+ await page.locator('#timesheet-day').fill('2028-03-01');await page.locator('#timesheet-day').press('Tab');await expect(page.locator('#timesheet-day')).toHaveValue('2028-02-29');
+ await page.setViewportSize({width:1280,height:900});await expect(page.locator('.time-table')).toBeVisible();await page.getByRole('button',{name:'Day view',exact:true}).click();await expect(page.locator('#timesheet-day')).toHaveValue('2028-02-29');
+ const doc=await (await page.request.get('/api/workspace')).json();expect(doc.data.sheets.find(s=>s.id==='mobile-leap').rows[0].hours['2028-02-29']).toBe(4);
+ await page.reload();await expect(page.getByRole('navigation')).toBeVisible();const persisted=await (await page.request.get('/api/workspace')).json();expect(persisted.data.sheets.find(s=>s.id==='s1').rows[0].hours[day]).toBe(8.25);
+});
+
+test('two users save separate timesheets and only same-timesheet edits conflict',async({page,browser})=>{
+ await page.goto('/');await register(page,'Concurrent admin',email('concurrent-admin'));
+ await page.evaluate(()=>{state=retainAccounts(seed());const sheet=state.sheets.find(s=>s.id==='s2');sheet.status='draft';sheet.rows.forEach(r=>r.status='draft');save();render()});await saved(page);
+ const context=await browser.newContext(),partner=await context.newPage();
+ await partner.goto(await invite(page,email('concurrent-partner'),'admin'));
+ // The invitation email is prefilled on the registration form.
+ const address=await partner.getByLabel('Email',{exact:true}).inputValue();
+ await register(partner,'Concurrent partner',address);
+ await page.evaluate(()=>openSheet('e1',periodFor(today())));
+ await partner.evaluate(()=>openSheet('e2',periodFor(today())));
+ await page.evaluate(()=>{const s=currentSheet();s.rows[0].hours[s.start]=9;save()});await saved(page);
+ await partner.evaluate(()=>{const s=currentSheet();s.rows[0].hours[s.start]=5;save()});await saved(partner);
+ let doc=(await (await page.request.get('/api/workspace')).json()).data;
+ expect(doc.sheets.find(s=>s.id==='s1').rows[0].hours[doc.sheets.find(s=>s.id==='s1').start]).toBe(9);
+ expect(doc.sheets.find(s=>s.id==='s2').rows[0].hours[doc.sheets.find(s=>s.id==='s2').start]).toBe(5);
+ // Idle refresh updates other records without changing the selected timesheet.
+ await page.bringToFront();
+ await page.evaluate(async()=>{document.activeElement?.blur();await refreshWorkspaceIfIdle()});
+ expect(await page.evaluate(()=>state.sheets.find(s=>s.id==='s2').rows[0].hours[state.sheets.find(s=>s.id==='s2').start])).toBe(5);
+ expect(await page.evaluate(()=>employeeId)).toBe('e1');
+ // A blurred, unsaved form must also be protected from automatic refresh.
+ await page.locator('nav button[title=Settings]').click();
+ await page.locator('input[name=business]').fill('Unsaved business draft');
+ await page.evaluate(()=>document.activeElement?.blur());
+ const beforeSettings=await (await partner.request.get('/api/workspace')).json();
+ const updated=await partner.request.patch('/api/workspace',{headers:{Origin:'http://127.0.0.1:3100'},data:{changes:[{collection:'settings',id:'email',before:beforeSettings.data.settings.email,after:'concurrent-billing@example.test'}]}});expect(updated.status()).toBe(200);
+ await page.evaluate(()=>refreshWorkspaceIfIdle());
+ await expect(page.locator('input[name=business]')).toHaveValue('Unsaved business draft');
+ expect(await page.evaluate(()=>state.settings.email)).not.toBe('concurrent-billing@example.test');
+ await page.locator('nav button[title=Timesheets]').click();await page.evaluate(async()=>{document.activeElement?.blur();await refreshWorkspaceIfIdle()});
+ expect(await page.evaluate(()=>state.settings.email)).toBe('concurrent-billing@example.test');
+ // Both users now start with the same sheet, then edit it independently.
+ for(const client of [page,partner])await client.evaluate(async()=>{await loadWorkspace();openSheet('e1',periodFor(today()))});
+ await page.evaluate(()=>{const s=currentSheet();s.rows[0].hours[s.start]=10;save()});await saved(page);
+ await partner.evaluate(()=>{const s=currentSheet();s.rows[0].hours[s.start]=11;save()});
+ await expect(partner.getByRole('dialog')).toContainText('Someone else changed this timesheet');
+ expect(await partner.evaluate(()=>currentSheet().rows[0].hours[currentSheet().start])).toBe(11);
+ doc=(await (await page.request.get('/api/workspace')).json()).data;
+ expect(doc.sheets.find(s=>s.id==='s1').rows[0].hours[doc.sheets.find(s=>s.id==='s1').start]).toBe(10);
+ await context.close();
 });
