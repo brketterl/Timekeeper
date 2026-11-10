@@ -377,10 +377,10 @@ test('government invoice setup creates a highlighted monthly PDF with locked cum
   await expect(page.getByRole('heading',{name:'C&C-TEST030',exact:true})).toBeVisible();await saved(page);
   await page.reload();await expect(page.getByRole('navigation')).toBeVisible();
   const replaced=await (await page.request.get('/api/workspace')).json();
-  expect(replaced.data.invoices.map(i=>i.number)).toEqual(['C&C-TEST030','C&C-TEST030']);
+  expect(replaced.data.invoices.map(i=>i.number)).toEqual(['C&C-TEST030','C&C-TEST021','C&C-TEST030']);
   expect(replaced.data.invoices[0].voided.reason).toBe('Correct historical invoice entry.');
-  expect(replaced.data.invoices[1].voided).toBeUndefined();
-  expect(replaced.data.invoices[1].government.cumulativeHours).toBe(12);
+  expect(replaced.data.invoices[2].voided).toBeUndefined();
+  expect(replaced.data.invoices[2].government.cumulativeHours).toBe(12);
 
 });
 
