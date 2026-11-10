@@ -172,3 +172,33 @@ test('invoice creation ignores unrelated saves but checks the billing data shown
  assert.equal((await f.request('/api/workspace',f.owner.cookie,{changes:[{collection:'settings',id:'invoiceSigners',before:current.data.settings.invoiceSigners,after:signers}]},'PATCH')).status,200);
  const blocked=await f.request('/api/invoices/government',f.owner.cookie,june);assert.equal(blocked.status,409);assert.match(blocked.body.error,/billing setup/);
 });
+
+test('record-only backfill preserves issued snapshots and stays outside future cumulative billing',()=>{
+  const d=data();sheet(d,'aug','2026-08-01',10);
+  const august=governmentInvoice(d,input(),'august');august.sentDate='2026-08-31';
+  const frozen=structuredClone(august);
+  sheet(d,'july','2026-07-01',8);
+  const historical=governmentInvoice(d,input('2026-07',{historicalRecord:true,number:'C&C-TEST021'}),'historical');
+  assert.equal(historical.government.historicalRecord,true);
+  assert.equal(historical.government.cumulativeHours,8);
+  assert.deepEqual(august,frozen);assert(validBackup(d));
+  assert.throws(()=>governmentInvoice(d,input('2026-07',{historicalRecord:true}),'duplicate'),/already has an invoice/);
+  sheet(d,'sep','2026-09-01',2);
+  const september=governmentInvoice(d,input('2026-09'),'september');
+  assert.equal(september.government.cumulativeHours,12);
+  assert.equal(september.government.cumulativeAmount,174000);
+  assert(validBackup(d));
+  const forged=structuredClone(d);delete forged.invoices[1].government.historicalRecord;
+  assert.equal(validateBilling(forged),false);
+  const malformed=structuredClone(d);malformed.invoices[1].government.historicalRecord='true';
+  assert.equal(validateBilling(malformed),false);
+});
+
+test('record-only backfill bypasses later drafts but retains approval and source protection',()=>{
+  const d=data();sheet(d,'aug','2026-08-01',10);governmentInvoice(d,input(),'august');
+  sheet(d,'july','2026-07-01',8);d.sheets[1].rows[0].status='submitted';
+  assert.throws(()=>governmentInvoice(d,input('2026-07',{historicalRecord:true}),'old'),/Approve all/);
+  d.sheets[1].rows[0].status='approved';
+  governmentInvoice(d,input('2026-07',{historicalRecord:true}),'old');assert(validBackup(d));
+  assert.throws(()=>governmentInvoice(d,input('2026-06',{historicalRecord:'true'}),'bad'),/valid historical/);
+});

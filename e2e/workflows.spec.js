@@ -332,6 +332,36 @@ test('government invoice setup creates a highlighted monthly PDF with locked cum
   await page.getByRole('button',{name:'Mark sent',exact:true}).click();await saved(page);
   const sent=await (await page.request.get('/api/workspace')).json();
   expect(sent.data.invoices[0].sentDate).toBe('2026-10-28');
+  // Backfill an older month without rewriting the existing invoice.
+  const original=structuredClone(sent.data.invoices[0]);
+  sent.data.sheets.push({id:'historical-july',employeeId:person.id,start:'2026-07-01',status:'approved',rows:[{id:'historical-row',contractId:c.id,status:'approved',note:'',hours:{'2026-07-01':8},rate:category.rate,taskOrderId:order.id,categoryId:category.id,laborCategory:category.name}]});
+  expect((await page.request.put('/api/workspace',{headers:{Origin:'http://127.0.0.1:3100'},data:{data:sent.data,revision:sent.revision}})).status()).toBe(200);
+  await page.reload();await page.locator('nav button[title=Invoices]').click();
+  await page.getByRole('button',{name:'Create invoice',exact:true}).click();
+  await page.getByLabel('Historical record only',{exact:true}).check();
+  await page.locator('#invoice-form [name=billingMonth]').fill('2026-07');
+  await page.locator('#invoice-form [name=invoiceNumber]').fill('C&C-TEST021');
+  await page.locator('#invoice-form [name=issued]').fill('2026-08-01');
+  await page.locator('#invoice-form [name=due]').fill('2026-08-31');
+  await page.getByRole('button',{name:'Create draft',exact:true}).click();
+  await expect(page.getByRole('heading',{name:'C&C-TEST021',exact:true,level:2})).toBeVisible();
+  await expect(page.locator('.invoice-paper')).toContainText('Excluded from running totals');
+  await page.getByRole('button',{name:/^Mark sent/}).click();
+  await page.locator('#send-form [name=date]').fill('2026-08-01');
+  await page.getByRole('button',{name:'Mark sent',exact:true}).click();await saved(page);
+  await page.getByRole('button',{name:'Record payment',exact:true}).click();
+  await page.locator('#payment-form [name=date]').fill('2026-08-20');
+  await page.getByRole('button',{name:'Save payment',exact:true}).click();await saved(page);
+  const backfilled=await (await page.request.get('/api/workspace')).json();
+  expect(backfilled.data.invoices.find(i=>i.id===original.id)).toEqual(original);
+  const history=backfilled.data.invoices.find(i=>i.number==='C&C-TEST021');
+  expect(history.government.historicalRecord).toBe(true);
+  expect(history.payments[0].date).toBe('2026-08-20');
+  expect(history.payments[0].amount).toBe(116000);
+
+
+  await page.evaluate(()=>invoiceDetail(state.invoices[0].id));
+
   // Re-enter a voided historical invoice without changing its external number.
   await page.getByRole('button',{name:'Void invoice',exact:true}).click();
   await page.locator('#correction-form [name=reason]').fill('Correct historical invoice entry.');
@@ -347,10 +377,10 @@ test('government invoice setup creates a highlighted monthly PDF with locked cum
   await expect(page.getByRole('heading',{name:'C&C-TEST030',exact:true})).toBeVisible();await saved(page);
   await page.reload();await expect(page.getByRole('navigation')).toBeVisible();
   const replaced=await (await page.request.get('/api/workspace')).json();
-  expect(replaced.data.invoices.map(i=>i.number)).toEqual(['C&C-TEST030','C&C-TEST030']);
+  expect(replaced.data.invoices.map(i=>i.number)).toEqual(['C&C-TEST030','C&C-TEST021','C&C-TEST030']);
   expect(replaced.data.invoices[0].voided.reason).toBe('Correct historical invoice entry.');
-  expect(replaced.data.invoices[1].voided).toBeUndefined();
-  expect(replaced.data.invoices[1].government.cumulativeHours).toBe(12);
+  expect(replaced.data.invoices[2].voided).toBeUndefined();
+  expect(replaced.data.invoices[2].government.cumulativeHours).toBe(12);
 
 });
 
