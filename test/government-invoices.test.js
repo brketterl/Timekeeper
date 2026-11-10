@@ -202,3 +202,12 @@ test('record-only backfill bypasses later drafts but retains approval and source
   governmentInvoice(d,input('2026-07',{historicalRecord:true}),'old');assert(validBackup(d));
   assert.throws(()=>governmentInvoice(d,input('2026-06',{historicalRecord:'true'}),'bad'),/valid historical/);
 });
+
+test('staging business refresh maps government billing identities without changing amounts or snapshots',async()=>{
+ const {prepareStagingRefresh}=await import('../server/staging-refresh.js');
+ const d=data();sheet(d,'may','2026-05-01',8);const invoice=governmentInvoice(d,input('2026-05'),'history');invoice.sentDate='2026-05-31';
+ const refreshed=prepareStagingRefresh(d,{employees:[{id:'stage-person',name:'Stage user',email:'person@example.test',active:true,contracts:[]}]},['stage-person']);
+ assert.equal(refreshed.sheets[0].employeeId,'stage-person');assert.equal(refreshed.contracts[0].billing.assignments[0].employeeId,'stage-person');
+ assert.equal(refreshed.invoices[0].lines[0].employeeId,'stage-person');assert.equal(refreshed.invoices[0].government.rows[0].employeeId,'stage-person');
+ assert.equal(refreshed.invoices[0].government.cumulativeAmount,invoice.government.cumulativeAmount);assert.equal(refreshed.invoices[0].number,invoice.number);assert(validBackup(refreshed));assert.equal(d.employees[0].id,'person');
+});

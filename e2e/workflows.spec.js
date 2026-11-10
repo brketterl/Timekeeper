@@ -653,3 +653,20 @@ test('two users save separate timesheets and only same-timesheet edits conflict'
  expect(doc.sheets.find(s=>s.id==='s1').rows[0].hours[doc.sheets.find(s=>s.id==='s1').start]).toBe(10);
  await context.close();
 });
+
+test('staging-only refresh imports a workspace JSON and preserves the staging sign-in',async({page})=>{
+ await page.goto('http://127.0.0.1:3103');const address=email('refresh-owner');await register(page,'Stage owner',address);
+ const before=await page.evaluate(()=>({employeeId:linkedEmployeeId,source:seed()}));
+ before.source.settings.business='Imported production snapshot';before.source.employees[0].email=address;
+ await page.locator('nav button[title=Settings]').click();
+ await expect(page.getByRole('heading',{name:'Refresh staging from production export'})).toBeVisible();
+ await page.locator('#staging-source').setInputFiles({name:'workspace.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(before.source))});
+ await expect(page.getByRole('dialog')).toContainText('Production is unchanged');
+ await page.getByRole('button',{name:'Back up and refresh staging',exact:true}).click();
+ await expect(page.getByRole('heading',{name:'Staging data refreshed',exact:true})).toBeVisible();
+ await page.getByRole('button',{name:'Done',exact:true}).click();await page.reload();
+ await expect(page.getByRole('navigation')).toBeVisible();
+ expect(await page.evaluate(()=>linkedEmployeeId)).toBe(before.employeeId);
+ expect(await page.evaluate(()=>state.settings.business)).toBe('Imported production snapshot');
+ expect(await page.evaluate(()=>state.invoices.length)).toBe(before.source.invoices.length);
+});
