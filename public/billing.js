@@ -11,7 +11,7 @@ export function voidBlockReason(data,i){
  if(!i.sentDate)return 'Only sent invoices can be voided.';
  if(i.voided)return 'This invoice is already voided.';
  if(paymentTotal(i)>0)return 'Reverse recorded payments before voiding this invoice. This does not refund money.';
- if(i.government&&data.invoices.some(other=>!other.voided&&other.contractId===i.contractId&&other.government?.taskOrderId===i.government.taskOrderId&&other.government.month>i.government.month))return 'Void newer invoices for this task order first to preserve cumulative totals.';
+ if(i.government&&!i.government.historicalRecord&&data.invoices.some(other=>!other.voided&&!other.government?.historicalRecord&&other.contractId===i.contractId&&other.government?.taskOrderId===i.government.taskOrderId&&other.government.month>i.government.month))return 'Void newer invoices for this task order first to preserve cumulative totals.';
  return '';
 }
 export function validateBilling(data) {
@@ -30,12 +30,13 @@ export function validateBilling(data) {
     for(const s of data.sheets) for(const r of s.rows) if(r.taskOrderId!==undefined && (!id(r.taskOrderId)||!id(r.categoryId)||!text(r.laborCategory,100))) return false;
     for(const i of data.invoices) if(i.government){
       const g=i.government;
+      if(g.historicalRecord!==undefined&&typeof g.historicalRecord!=='boolean')return false;
       if(g.version!==1||!id(g.taskOrderId)||!/^\d{4}-(0[1-9]|1[0-2])$/.test(g.month)||!text(g.agreementNumber)||!text(g.taskOrderNumber,50)||!text(g.project)||!validDate(g.popStart)||!validDate(g.popEnd)||!cents(g.funding)||g.funding<1||!cents(g.cumulativeAmount)||!Number.isFinite(g.cumulativeHours)||g.cumulativeHours<0||!cents(g.remaining)||g.remaining!==g.funding-g.cumulativeAmount||!text(g.signerName,100)||!text(g.signerTitle,100)||!text(g.certification,2000)||!Array.isArray(g.rows)||!g.rows.length) return false;
       if(!g.rows.every(r=>id(r.employeeId)&&id(r.categoryId)&&text(r.employee,100)&&text(r.category,100)&&cents(r.rate)&&r.rate>0&&Number.isFinite(r.hours)&&r.hours>=0&&cents(r.amount)&&Number.isFinite(r.cumulativeHours)&&r.cumulativeHours>=r.hours&&cents(r.cumulativeAmount)&&r.cumulativeAmount>=r.amount))return false;
       if(g.rows.reduce((n,r)=>n+r.amount,0)!==i.lines.reduce((n,l)=>n+l.amount,0)||g.rows.reduce((n,r)=>n+r.cumulativeAmount,0)!==g.cumulativeAmount||g.rows.reduce((n,r)=>n+r.cumulativeHours,0)!==g.cumulativeHours)return false;
       if(i.voided)continue;
       if(data.invoices.filter(other=>!other.voided&&other.contractId===i.contractId&&other.government?.taskOrderId===g.taskOrderId&&other.government.month===g.month).length!==1)return false;
-      const earlier=data.invoices.filter(other=>!other.voided&&other.contractId===i.contractId&&other.government?.taskOrderId===g.taskOrderId&&other.government.month<g.month);
+      const earlier=g.historicalRecord?[]:data.invoices.filter(other=>!other.voided&&!other.government?.historicalRecord&&other.contractId===i.contractId&&other.government?.taskOrderId===g.taskOrderId&&other.government.month<g.month);
       if(earlier.some(other=>!other.sentDate))return false;
       const expected=new Map();
       for(const l of [...earlier.flatMap(other=>other.lines),...i.lines]){
@@ -76,7 +77,11 @@ export function governmentInvoice(data,input,invoiceId) {
   if(!order||!signer)throw Error('Select a task order and an invoice signer.');
   if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(input.month)||!validDate(input.issued)||!validDate(input.due)||input.issued<monthEnd(input.month)||input.due<input.issued)throw Error('Use a calendar month and an invoice date on or after that month ends, with a valid due date.');
   if(data.invoices.some(i=>i.contractId===c.id&&!i.government))throw Error('This contract has standard-format invoices that cannot be assigned to a task order automatically. Use a separate government contract record and enter its history chronologically.');
-  const previous=data.invoices.filter(i=>!i.voided&&i.contractId===c.id&&i.government?.taskOrderId===order.id);
+  if(input.historicalRecord!==undefined&&typeof input.historicalRecord!=='boolean')throw Error('Choose a valid historical record option.');
+  const historicalRecord=input.historicalRecord===true;
+  const matching=data.invoices.filter(i=>!i.voided&&i.contractId===c.id&&i.government?.taskOrderId===order.id);
+  if(matching.some(i=>i.government.month===input.month))throw Error('This task order already has an invoice for this month.');
+  const previous=historicalRecord?[]:matching.filter(i=>!i.government.historicalRecord);
   if(previous.some(i=>!i.sentDate))throw Error('Mark the previous task-order invoice as sent before creating the next one.');
   const blocking=previous.find(i=>i.government.month>=input.month);
   if(blocking)throw Error(`This task order already has an invoice for this or a later month: ${blocking.number} (${blocking.government.month}). Check the selected billing month. Create historical invoices oldest first to preserve cumulative totals.`);
@@ -106,6 +111,6 @@ export function governmentInvoice(data,input,invoiceId) {
   if(!text(number,80)||!number.trim()||/[\x00-\x1f<>]/.test(number)||data.invoices.some(i=>!i.voided&&i.number===number))throw Error('Use an invoice number of at most 80 characters that is not used by another active invoice. A voided invoice number can be reused.');
   if(number===generated.number)b.nextNumber=generated.next;
   else if(number.startsWith(b.prefix)&&/^\d+$/.test(number.slice(b.prefix.length)))b.nextNumber=Math.max(b.nextNumber,Number(number.slice(b.prefix.length))+1);
-  const invoice={id:invoiceId,number,contractId:c.id,client:c.client,contract:c.name,email:c.email,address:c.address,business:{business:data.settings.business,email:data.settings.email,address:data.settings.address,paymentNote:data.settings.paymentNote,schedule:data.settings.schedule},issued:input.issued,due:input.due,sentDate:null,lines,payments:[],note:'',government:{version:1,certification,taskOrderId:order.id,month:input.month,agreementNumber:b.agreementNumber,taskOrderNumber:order.number,project:b.project,popStart:order.popStart,popEnd:order.popEnd,funding:order.funding,cumulativeAmount,cumulativeHours,remaining:order.funding-cumulativeAmount,signerName:signer.name,signerTitle:signer.title,rows:[...rows.values()]}};
+  const invoice={id:invoiceId,number,contractId:c.id,client:c.client,contract:c.name,email:c.email,address:c.address,business:{business:data.settings.business,email:data.settings.email,address:data.settings.address,paymentNote:data.settings.paymentNote,schedule:data.settings.schedule},issued:input.issued,due:input.due,sentDate:null,lines,payments:[],note:'',government:{version:1,...(historicalRecord?{historicalRecord:true}:{}),certification,taskOrderId:order.id,month:input.month,agreementNumber:b.agreementNumber,taskOrderNumber:order.number,project:b.project,popStart:order.popStart,popEnd:order.popEnd,funding:order.funding,cumulativeAmount,cumulativeHours,remaining:order.funding-cumulativeAmount,signerName:signer.name,signerTitle:signer.title,rows:[...rows.values()]}};
   data.invoices.push(invoice);return invoice;
 }

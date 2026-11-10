@@ -33,7 +33,7 @@ To backfill the current contract, work **oldest month first**:
 4. Mark it sent using its original sent date before creating the next month.
 5. Repeat chronologically; update the category rate when historical rates change. Already submitted/approved rows keep their locked rate. When finished, set the current category rates and next invoice sequence.
 
-There are no opening-balance shortcuts. Cumulative figures become accurate only after the relevant history has been entered. Creating a later-month invoice before entering earlier history is blocked from correction by backdating another invoice behind it; deleting an unsent later draft lets you enter the earlier months first. Correcting an already-issued sequence needs a deliberate restore/correction process, not a silent recalculation. Credits, voids, and invoice amendments are not implemented by this MVP.
+There are no opening-balance shortcuts. Cumulative figures become accurate only after the relevant history has been entered. Creating a later-month invoice before entering earlier history is blocked from correction by backdating another invoice behind it; deleting an unsent later draft lets you enter the earlier months first. For receipt-only backfills that must leave running totals unchanged, use **Historical record only** as described below. Correcting the cumulative totals of an already-issued sequence still needs a deliberate restore/correction process, not a silent recalculation. Credits, voids, and invoice amendments are not implemented by this MVP.
 
 ## 4. Create a government invoice
 
@@ -66,3 +66,11 @@ Encrypted recovery backups include these fields, and updated tools verify/restor
 No new environment variables are required. Test locally with `git switch staging`, `git pull origin staging`, `npm ci`, and `npm start`. Use test accounts/data and test R2 storage, not the production database. Test two historical months, two semi-monthly sheets, a rate change, numbering, a funding amendment, and printing before production approval.
 
 Before releasing, keep a verified production recovery archive and matching encryption key. Reverting to old code can reject custom invoice numbers or ignore billing extensions; use the updated recovery tools or fix forward. A pre-feature database restore loses later changes and requires a maintenance window and new data directory. Government billing does not change the existing account, employee, or workspace access rules.
+
+## Historical records without running totals
+
+For closed contracts or receipt backfills, select **Historical record only** in Create invoice. Enter the original billing month, invoice number, issue date, and due date. This allows a month earlier than existing invoices without rewriting those invoices. The record uses approved, unbilled time and still enforces unique invoice numbers and one invoice per task order/month.
+
+Historical records are excluded from regular invoices’ cumulative hours, dollars, and funding consumption. Their preview uses a record-keeping layout with an explicit historical label, without cumulative figures or certification. Mark the record sent using the original sent date, then use **Record payment** with the actual date and amount received. Receipt reporting uses the payment date: December 2025 work paid in 2026 contributes to 2026 receipts. Creating the record alone does not record cash received.
+
+The historical designation is frozen with the invoice snapshot and retained in backups, imports, and the creation audit event. Regular chronological billing remains the default.
