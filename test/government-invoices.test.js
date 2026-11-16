@@ -215,3 +215,12 @@ test('invoicing within the billing month requires explicit confirmation and pres
   const invoice=governmentInvoice(d,{...early,confirmEarlyInvoice:true},'early');
   assert.equal(invoice.issued,'2026-08-28');assert.equal(invoice.lines[0].hours,8);assert(validBackup(d));
 });
+
+test('staging business refresh maps government billing identities without changing amounts or snapshots',async()=>{
+ const {prepareStagingRefresh}=await import('../server/staging-refresh.js');
+ const d=data();sheet(d,'may','2026-05-01',8);const invoice=governmentInvoice(d,input('2026-05'),'history');invoice.sentDate='2026-05-31';
+ const refreshed=prepareStagingRefresh(d,{employees:[{id:'stage-person',name:'Stage user',email:'person@example.test',active:true,contracts:[]}]},['stage-person']);
+ assert.equal(refreshed.sheets[0].employeeId,'stage-person');assert.equal(refreshed.contracts[0].billing.assignments[0].employeeId,'stage-person');
+ assert.equal(refreshed.invoices[0].lines[0].employeeId,'stage-person');assert.equal(refreshed.invoices[0].government.rows[0].employeeId,'stage-person');
+ assert.equal(refreshed.invoices[0].government.cumulativeAmount,invoice.government.cumulativeAmount);assert.equal(refreshed.invoices[0].number,invoice.number);assert(validBackup(refreshed));assert.equal(d.employees[0].id,'person');
+});

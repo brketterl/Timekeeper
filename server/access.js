@@ -4,6 +4,7 @@ import { isGovernment, rowTerms, governmentInvoice, governmentInvoiceBasis, void
 import { auditStore } from './audit.js';
 import { validBackup } from './validation.js';
 import { applyChanges } from './changes.js';
+import { prepareStagingRefresh } from './staging-refresh.js';
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -31,7 +32,7 @@ function validateSheetTransition(old, sheet, role) {
   if(role==='employee'&&old.rows.some(r=>r.status==='approved'))throw fail(403,'Approved timesheets are locked.');
 }
 
-export function accessStore(db, { onAuditEvent, notificationStatus, retryNotifications } = {}) {
+export function accessStore(db, { onAuditEvent, notificationStatus, retryNotifications, stagingRefreshBackup } = {}) {
   const audit = auditStore(db, { onEvent: onAuditEvent });
   const log = (session, type, id, summary, details) => audit.record(session.workspace_id, session.user_id, type, id, summary, details);
   const removedFeedback=(session,sheet,row)=>{
@@ -103,8 +104,13 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
     return { ...doc, role: session.role, employeeId: session.employee_id, workspaceId: session.workspace_id,
       ...(session.role === 'admin' ? { memberEmployeeIds } : {}) };
   }
-  function writeAdmin(session, input, { restore = false } = {}) {
+  function writeAdmin(session, input, { restore = false, refresh = false } = {}) {
     return transaction(() => {
+      if(refresh){
+        if(!stagingRefreshBackup)throw fail(404,'Staging refresh is disabled.');
+        const current=document(session.workspace_id);if(input.revision!==current.revision)throw fail(409,'Staging changed. Reload before refreshing its data.');
+        input={data:prepareStagingRefresh(input.data,current.data,members(session.workspace_id).map(m=>m.employeeId).filter(Boolean)),revision:current.revision};
+      }
       const patched=Object.hasOwn(input,'changes');
       if(patched){const current=document(session.workspace_id);input={data:applyChanges(current.data,input.changes),revision:current.revision}}
       if (!input.data || !validBackup(input.data)) throw fail(400, 'Invalid workspace data.');
@@ -144,8 +150,10 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
           Object.assign(row,{rate:old.rate,taskOrderId:old.taskOrderId,categoryId:old.categoryId,laborCategory:old.laborCategory});
         } else { try { Object.assign(row,rowTerms(c,sheet.employeeId,row)); } catch(e) { throw fail(400,e.message); } }
       }
+      const refreshBackup=refresh?stagingRefreshBackup(before,session.workspace_id):null;
       const result = write(session.workspace_id, input.data, input.revision);
       audit.changes(session, before, input.data, { restored: restore });
+      if(refresh){log(session,'workspace.staging_refreshed',session.workspace_id,'Refreshed staging business data from workspace export');return {...result,backup:refreshBackup}}
       if(restore)log(session,'workspace.restored',session.workspace_id,'Restored workspace JSON backup');
       return patched?{...result,data:read(session).data}:result;
     });
@@ -228,6 +236,8 @@ export function accessStore(db, { onAuditEvent, notificationStatus, retryNotific
       return writeEmployee(session,method==='PATCH'?{changes:input.changes}:input);
     }
     if (session.role !== 'admin') throw fail(403, 'Admin access is required.');
+    if(path==='/api/staging-refresh/status'&&method==='GET')return {enabled:!!stagingRefreshBackup};
+    if(path==='/api/staging-refresh'&&method==='POST')return writeAdmin(session,input,{restore:true,refresh:true});
     const employeeMatch = /^\/api\/employees\/([a-zA-Z0-9_-]+)\/remove$/.exec(path);
     if (employeeMatch && method === 'POST') return transaction(() => {
       const employeeId = employeeMatch[1], doc = document(session.workspace_id);

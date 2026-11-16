@@ -25,8 +25,11 @@ server.listen(3100, '127.0.0.1');
 const closedDataDir = mkdtempSync(join(tmpdir(), 'timekeeper-closed-e2e-'));
 const closedServer = createApp({ dataDir: closedDataDir, secureCookies: false, allowedOrigin: null });
 closedServer.listen(3102, '127.0.0.1');
+const refreshDataDir=mkdtempSync(join(tmpdir(),'timekeeper-refresh-e2e-'));
+const refreshServer=createApp({dataDir:refreshDataDir,secureCookies:false,allowedOrigin:null,allowPublicRegistration:true,stagingRefresh:true});refreshServer.listen(3103,'127.0.0.1');
 const shutdown = () => {
   inbox.close();
+  refreshServer.close(()=>rmSync(refreshDataDir,{recursive:true,force:true}));
   closedServer.close(() => rmSync(closedDataDir, { recursive: true, force: true }));
   server.close(() => rmSync(dataDir, { recursive: true, force: true }));
   setTimeout(() => server.closeAllConnections(), 2000).unref();

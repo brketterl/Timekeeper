@@ -2,10 +2,10 @@ import { createServer } from 'node:http';
 import { randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual, createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { readFile } from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
+import { createReadStream, mkdirSync, writeFileSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
 import { openDatabase } from './db.js';
 import { accessStore } from './access.js';
 import { timesheetNotifications } from './timesheet-notifications.js';
@@ -46,7 +46,7 @@ async function body(req) {
   catch { throw fail(400, 'Invalid JSON.'); }
 }
 
-export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), secureCookies = process.env.NODE_ENV === 'production', allowedOrigin = process.env.APP_ORIGIN, backupConfig = null, accountEmailConfig = null, authAttemptLimit = 20, allowPublicRegistration = false, timesheetEmailConfig = null } = {}) {
+export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), secureCookies = process.env.NODE_ENV === 'production', allowedOrigin = process.env.APP_ORIGIN, backupConfig = null, accountEmailConfig = null, authAttemptLimit = 20, allowPublicRegistration = false, timesheetEmailConfig = null, stagingRefresh = false } = {}) {
   if (secureCookies && !allowedOrigin) throw Error('APP_ORIGIN is required in production.');
   if (allowedOrigin) {
     const origin = new URL(allowedOrigin);
@@ -58,11 +58,16 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
     const origin = new URL(config.origin);
     if (!['http:', 'https:'].includes(origin.protocol) || origin.origin !== config.origin || (secureCookies && origin.protocol !== 'https:')) throw Error('Account email requires a trusted app origin.');
   }
+  if(stagingRefresh&&(accountEmailConfig||timesheetEmailConfig||backupConfig?.destination||backupConfig?.alerts))throw Error('Disable outgoing email and external backup integrations before enabling staging refresh.');
   const db = openDatabase(dataDir);
   const accounts = accountEmail(db, accountEmailConfig, { hashPassword });
   const attempts = new Map();
   const notices = timesheetNotifications(db, timesheetEmailConfig);
-  const access = accessStore(db, { onAuditEvent: notices.enqueue, notificationStatus: notices.status, retryNotifications: notices.retryFailed });
+  const access = accessStore(db, { onAuditEvent: notices.enqueue, notificationStatus: notices.status, retryNotifications: notices.retryFailed,stagingRefreshBackup:stagingRefresh?(data,workspaceId)=>{
+    const directory=join(dataDir,'staging-refresh-backups');mkdirSync(directory,{recursive:true,mode:0o700});
+    const filename=`${Date.now()}-${workspaceId}-${randomUUID()}.json`;
+    writeFileSync(join(directory,filename),JSON.stringify(data),{flag:'wx',mode:0o600});return filename;
+  }:null });
   const recovery = backupService(db, backupConfig, { destination: backupConfig?.destination });
   function checkAuthLimit(req) {
     const now = Date.now();
@@ -97,7 +102,7 @@ export function createApp({ dataDir = resolve(process.env.DATA_DIR || '.data'), 
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
         return res.end(await readFile(new URL('../public/billing.js', import.meta.url)));
       }
-      if (req.method === 'GET' && ['/auth.js', '/access.js', '/backups.js', '/activity.js', '/notifications.js', '/government.js', '/recovery.js', '/approvals.js', '/invoice-selection.js', '/mobile-timesheets.js'].includes(path)) {
+      if (req.method === 'GET' && ['/auth.js', '/access.js', '/backups.js', '/activity.js', '/notifications.js', '/government.js', '/recovery.js', '/approvals.js', '/invoice-selection.js', '/mobile-timesheets.js','/staging-refresh.js'].includes(path)) {
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
         return res.end(await readFile(new URL(`../public${path}`, import.meta.url)));
       }
@@ -284,7 +289,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const accountEmailConfig = accountConfig ? { send: resendTransport(accountConfig), origin: new URL(options.allowedOrigin || `http://127.0.0.1:${port}`).origin } : null;
   const notificationConfig = await timesheetEmailOptions();
   const timesheetEmailConfig = notificationConfig ? { send: resendTransport(notificationConfig), origin: new URL(options.allowedOrigin || `http://127.0.0.1:${port}`).origin } : null;
-  const server = createApp({ ...options, backupConfig, accountEmailConfig, timesheetEmailConfig });
+  const stagingRefresh=process.env.STAGING_DATA_REFRESH_ENABLED==='true';
+  if(stagingRefresh&&options.allowedOrigin!=='https://timekeeper-staging-43o7.onrender.com')throw Error('Staging refresh is restricted to the staging service origin.');
+  const server = createApp({ ...options, backupConfig, accountEmailConfig, timesheetEmailConfig, stagingRefresh });
   server.listen(port, host, () => console.log(`Timekeeper listening on ${host}:${port}`));
   const shutdown = () => {
     server.close(() => { process.exitCode = 0; });
