@@ -305,8 +305,13 @@ test('government invoice setup creates a highlighted monthly PDF with locked cum
   await page.reload(); await page.locator('nav button[title=Invoices]').click();
   await page.getByRole('button',{name:'Create invoice',exact:true}).click();
   await page.locator('#invoice-form [name=billingMonth]').fill('2026-08');
-  await page.locator('#invoice-form [name=issued]').fill('2026-08-31');
+  await page.locator('#invoice-form [name=issued]').fill('2026-08-28');
   await page.locator('#invoice-form [name=due]').fill('2026-09-30');
+  page.once('dialog',async dialog=>{expect(dialog.message()).toContain('Are you ready to invoice for this month?');await dialog.dismiss();});
+  await page.getByRole('button',{name:'Create draft',exact:true}).click();
+  await expect(page.locator('#invoice-form')).toBeVisible();
+  expect((await (await page.request.get('/api/workspace')).json()).data.invoices).toHaveLength(0);
+  page.once('dialog',dialog=>dialog.accept());
   await page.getByRole('button',{name:'Create draft',exact:true}).click();
   await expect(page.getByRole('heading',{name:'C&C-TEST030',exact:true})).toBeVisible();
   await expect(page.locator('.gov-paper')).toContainText('RTE II');

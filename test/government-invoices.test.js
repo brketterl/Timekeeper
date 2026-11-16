@@ -55,7 +55,9 @@ test('server uses locked category rates, rejects tampering and scopes invoices t
   current=(await f.request('/api/workspace',f.owner.cookie)).body;assert.equal(current.data.sheets[0].rows[0].rate,14500);current.data.sheets[0].status='approved';current.data.sheets[0].rows[0].status='approved';
   assert.equal((await f.request('/api/workspace',f.owner.cookie,{data:current.data,revision:current.revision},'PUT')).status,200);
   current=(await f.request('/api/workspace',f.owner.cookie)).body;
-  const created=await f.request('/api/invoices/government',f.owner.cookie,{...input(),revision:current.revision,government:{remaining:999999}});assert.equal(created.status,200);
+  const early=input('2026-08',{issued:'2026-08-28'});
+  const unconfirmed=await f.request('/api/invoices/government',f.owner.cookie,{...early,revision:current.revision});assert.equal(unconfirmed.status,400);assert.match(unconfirmed.body.error,/Confirm you are ready/);
+  const created=await f.request('/api/invoices/government',f.owner.cookie,{...early,confirmEarlyInvoice:true,revision:current.revision,government:{remaining:999999}});assert.equal(created.status,200);
   current=(await f.request('/api/workspace',f.owner.cookie)).body;assert.equal(current.data.invoices[0].government.cumulativeAmount,145000);
   const changed=structuredClone(current);changed.data.invoices[0].government.signerName='Forged signer';
   assert.equal((await f.request('/api/workspace',f.owner.cookie,{data:changed.data,revision:changed.revision},'PUT')).status,409);
@@ -201,4 +203,15 @@ test('record-only backfill bypasses later drafts but retains approval and source
   d.sheets[1].rows[0].status='approved';
   governmentInvoice(d,input('2026-07',{historicalRecord:true}),'old');assert(validBackup(d));
   assert.throws(()=>governmentInvoice(d,input('2026-06',{historicalRecord:'true'}),'bad'),/valid historical/);
+});
+
+
+test('invoicing within the billing month requires explicit confirmation and preserves valid snapshots',()=>{
+  const d=data();sheet(d,'first','2026-08-01',8);
+  const early=input('2026-08',{issued:'2026-08-28',due:'2026-09-28'});
+  for(const confirmEarlyInvoice of [undefined,false,'true'])assert.throws(()=>governmentInvoice(d,{...early,confirmEarlyInvoice},'early'),/Confirm you are ready/);
+  assert.equal(d.invoices.length,0);assert.equal(d.contracts[0].billing.nextNumber,30);
+  assert.throws(()=>governmentInvoice(d,{...early,issued:'2026-07-31',confirmEarlyInvoice:true},'invalid'),/within or after/);
+  const invoice=governmentInvoice(d,{...early,confirmEarlyInvoice:true},'early');
+  assert.equal(invoice.issued,'2026-08-28');assert.equal(invoice.lines[0].hours,8);assert(validBackup(d));
 });
