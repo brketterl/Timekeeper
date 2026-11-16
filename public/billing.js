@@ -75,7 +75,8 @@ export function governmentInvoice(data,input,invoiceId) {
   if(!c||!isGovernment(c)||b?.template!=='government')throw Error('Complete government invoice setup for this contract first.');
   const order=b.taskOrders.find(o=>o.id===input.taskOrderId),signer=data.settings.invoiceSigners?.find(s=>s.id===input.signerId);
   if(!order||!signer)throw Error('Select a task order and an invoice signer.');
-  if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(input.month)||!validDate(input.issued)||!validDate(input.due)||input.issued<monthEnd(input.month)||input.due<input.issued)throw Error('Use a calendar month and an invoice date on or after that month ends, with a valid due date.');
+  if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(input.month)||!validDate(input.issued)||!validDate(input.due)||input.issued<input.month+'-01'||input.due<input.issued)throw Error('Use a calendar month and an invoice date within or after that month, with a valid due date.');
+  if(input.issued<monthEnd(input.month)&&input.confirmEarlyInvoice!==true)throw Error('The billing month has not ended. Confirm you are ready to invoice for this month.');
   if(data.invoices.some(i=>i.contractId===c.id&&!i.government))throw Error('This contract has standard-format invoices that cannot be assigned to a task order automatically. Use a separate government contract record and enter its history chronologically.');
   if(input.historicalRecord!==undefined&&typeof input.historicalRecord!=='boolean')throw Error('Choose a valid historical record option.');
   const historicalRecord=input.historicalRecord===true;

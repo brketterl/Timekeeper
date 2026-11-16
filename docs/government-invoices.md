@@ -43,7 +43,7 @@ Open **Invoices → Create invoice**, select the contract, then choose:
 - Task/work order.
 - Printed signer.
 - Invoice number (defaults to the configured sequence; editable for original historical numbers).
-- Issue date on or after the last day of that month, and a due date on/after issue date.
+- Issue date within or after the billing month, and a due date on/after issue date. Dates before month end require confirmation.
 
 The server selects approved, unbilled rows for that exact month/order. All positive-hour rows for that month/order must be approved. The same source row cannot be invoiced twice, and each order permits one invoice per calendar month. Other orders/months are excluded. A prior unsent invoice for that order must be marked sent or deleted before creating another. Historical entries are recorded only; the app does not email invoice PDFs.
 
@@ -74,3 +74,5 @@ For closed contracts or receipt backfills, select **Historical record only** in 
 Historical records are excluded from regular invoices’ cumulative hours, dollars, and funding consumption. Their preview uses a record-keeping layout with an explicit historical label, without cumulative figures or certification. Mark the record sent using the original sent date, then use **Record payment** with the actual date and amount received. Receipt reporting uses the payment date: December 2025 work paid in 2026 contributes to 2026 receipts. Creating the record alone does not record cash received.
 
 The historical designation is frozen with the invoice snapshot and retained in backups, imports, and the creation audit event. Regular chronological billing remains the default.
+
+Invoices may be dated within the billing month. Before month end, Create draft asks you to confirm you are ready to invoice for the month. Cancel keeps the form open without creating an invoice. Confirm creates the draft from approved hours currently entered; the one-active-invoice-per-task-order/month rule still applies.
